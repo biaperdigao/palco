@@ -261,8 +261,17 @@ function paraOPalco(q){
    com volta 3,6 — a mão andou 3,6 vezes o comprimento do arco dentro dele. O
    corte por span só conta ângulo COM SINAL, então vaivém não o faz crescer, e a
    virada nem sempre pega. Um teto de tempo não depende de reconhecer nada: o
-   traço tem meio segundo de vida, e depois disso está pronto por decreto. */
-const TRACO_MS = 500;
+   traço tem um tempo de vida, e depois disso está pronto por decreto.
+
+   O VALOR é o botão da densidade da composição, porque ele multiplica com a
+   duração da captura: 5s ÷ teto = quantos traços saem só pelo tempo, mais os que
+   a virada cortar. Meio segundo dava até 10 e o desenho virava emaranhado.
+   ?traco=600 (ou qualquer número em ms) ajusta ao vivo, para afinar com a câmera
+   em vez de no escuro. */
+const TRACO_MS = (() => {
+  const m = /traco=(\d{2,5})/.exec(location.search);
+  return m ? Math.min(5000, Math.max(150, +m[1])) : 800;
+})();
 
 /* --- A BOLA — o ponto de repouso ---
    A §1 diz que o rastro cru da mão nunca aparece, "nem ponto, nem bolinha". Esta
