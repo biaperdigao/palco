@@ -1,0 +1,2495 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PALCO — captura de gesto</title>
+
+<!--
+  PALCO · captura de gesto — reconstrução
+
+  A ORDEM DE CONSTRUÇÃO DA §7, toda construída:
+    1 · captura + máquina de exclusividade + diagnóstico
+    2 · redução a arcos por mínimos quadrados (até 3)
+    3 · regra das juntas sobre a composição, com baseStart/baseExtent
+    4 · filtro gooey
+    5 · experiência ao vivo — arcos persistentes, cálculo incremental, inércia
+
+  A etapa 5 tem um plano próprio, e é nela que o trabalho está:
+    5.1 camada de inércia (alvo × desenhada)                    feito
+    5.2 composição se formando durante a captura                feito
+    5.3 arco vivo, um por episódio, nunca trocado               feito
+    5.4 o que acontece ao fechar                                RESOLVIDO DE OUTRO
+        JEITO: a spec previa partir em até 3 ao assentar; a cliente pediu que o
+        arco ficasse exatamente onde a mão o deixou (CONGELA). Quem resolve
+        gestos longos agora é a corrente, que parte DURANTE o gesto.
+    5.5 afinar o atraso com gente de verdade                    EM ABERTO
+        INERCIA_TAU está em 70ms e nunca foi testado fora daqui.
+
+  O QUE FOI DESLIGADO POR DECISÃO DA CLIENTE, com o código inteiro no lugar:
+    coesão entre arcos      ?coesao=1
+    zoom de enquadramento   ?enquadra=1
+
+  EXPERIMENTOS EM ABERTO, esperando julgamento com câmera:
+    ?corrente=1    parte o gesto quando o arco enche (161°)
+    ?raio=gesto    o arco fica com o raio do gesto, não com a faixa da fonte
+
+  O rastro cru só aparece com o diagnóstico ligado (tecla D) — nunca no modo
+  normal, por decisão da spec §1 e §6.
+-->
+
+<style>
+  :root{
+    --tinta:#FFFFFF; --papel:#0A0A0A; --cinza:#8C8C8C; --klein:#002FA7;
+    --linha:#262626;
+    --ui: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--papel); color:var(--tinta); font-family:var(--ui);
+       -webkit-font-smoothing:antialiased; padding:28px 18px 60px}
+  .plc{max-width:820px; margin:0 auto}
+  .plc-topo{display:flex; align-items:baseline; justify-content:space-between; font-size:10px;
+    letter-spacing:.18em; text-transform:uppercase; color:var(--cinza); padding:0 2px 10px}
+  .plc-palco{color:var(--tinta); letter-spacing:.34em}
+
+  .plc-cena{position:relative; width:100%; aspect-ratio:4/3; border:1px solid var(--linha);
+    overflow:hidden; background:var(--papel)}
+  .plc-cena canvas{position:absolute; inset:0; width:100%; height:100%; display:block}
+  #plc-video{position:absolute; width:1px; height:1px; opacity:0; pointer-events:none}
+
+  .plc-camada{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:16px; text-align:center; padding:24px; z-index:3}
+  .plc-camada[hidden]{display:none}
+  .plc-legenda{font-size:11px; line-height:1.7; letter-spacing:.04em; color:var(--cinza); max-width:36ch}
+  .plc-legenda b{color:var(--tinta); font-weight:500}
+
+  .plc-btn{font:inherit; font-size:10px; letter-spacing:.2em; text-transform:uppercase;
+    background:var(--tinta); color:var(--papel); border:1px solid var(--tinta); padding:11px 22px;
+    cursor:pointer; transition:background .15s,color .15s}
+  .plc-btn:hover{background:transparent; color:var(--tinta)}
+  .plc-btn.fantasma{background:transparent; color:var(--tinta)}
+  .plc-btn.fantasma:hover{background:var(--tinta); color:var(--papel)}
+  .plc-btn:focus-visible,.plc-sw:focus-visible{outline:2px solid var(--klein); outline-offset:2px}
+  .plc-btns{display:flex; gap:8px; flex-wrap:wrap; justify-content:center}
+
+  .plc-conta{font-size:64px; font-weight:300; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+  .plc-relogio{position:absolute; top:12px; left:14px; z-index:4; font-size:10px; letter-spacing:.16em;
+    color:var(--cinza); font-variant-numeric:tabular-nums}
+  .plc-fase{position:absolute; top:12px; right:14px; z-index:4; font-size:10px; letter-spacing:.16em;
+    color:var(--cinza); text-transform:uppercase}
+  .plc-barra{position:absolute; left:0; bottom:0; height:2px; background:var(--tinta); width:0; z-index:4}
+  .plc-selo{position:absolute; left:14px; bottom:12px; z-index:4; font-size:9px; letter-spacing:.22em;
+    text-transform:uppercase; color:var(--klein)}
+
+  .plc-ctrl{padding:16px 2px 4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+  .plc-ctrl[hidden]{display:none}
+  .plc-fonte{display:flex; gap:6px; margin-right:auto; align-items:center}
+  .plc-fonte span{font-size:9px; letter-spacing:.18em; text-transform:uppercase; color:var(--cinza)}
+  .plc-sw{font:inherit; font-size:9px; letter-spacing:.14em; text-transform:uppercase;
+    background:none; border:1px solid var(--linha); color:var(--cinza); padding:6px 10px; cursor:pointer}
+  .plc-sw[aria-pressed="true"]{border-color:var(--tinta); color:var(--tinta)}
+
+  .plc-nota{font-size:10px; line-height:1.8; color:var(--cinza); padding:14px 2px 0;
+    border-top:1px solid var(--linha); margin-top:14px}
+  .plc-erro{color:var(--tinta); font-size:11px; line-height:1.7; max-width:40ch}
+
+  /* ---- diagnóstico ---- */
+  .plc-diag{margin-top:14px; border:1px solid var(--linha); padding:14px; font-size:10.5px;
+    line-height:1.6; color:var(--tinta); background:#121212; overflow-x:auto}
+  .plc-diag[hidden]{display:none}
+  .plc-diag h4{margin:0 0 6px; font-size:9px; letter-spacing:.2em; text-transform:uppercase;
+    color:var(--cinza); font-weight:500}
+  .plc-diag section{padding:9px 0; border-top:1px solid var(--linha)}
+  .plc-diag section:first-of-type{border-top:0; padding-top:0}
+  .plc-diag table{border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums}
+  .plc-diag th{text-align:right; font-weight:500; color:var(--cinza); padding:2px 8px 2px 0; white-space:nowrap}
+  .plc-diag th:first-child{text-align:left}
+  .plc-diag td{text-align:right; padding:2px 8px 2px 0; white-space:nowrap}
+  .plc-diag td:first-child{text-align:left; color:var(--cinza)}
+  .plc-diag .morre{color:#FF5A5A}
+  .plc-diag .passa{color:#6E93FF}
+  .plc-diag .vivo{color:#FFFFFF; font-weight:600}
+  .plc-diag p{margin:4px 0 0; color:var(--cinza)}
+  .plc-diag code{background:#1E1E1E; padding:1px 4px}
+  .plc-barrinha{display:inline-block; height:6px; background:var(--klein); vertical-align:middle}
+  @media (prefers-reduced-motion: reduce){*{transition:none !important}}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- §5.4 · a fusão nas juntas. Pathfinder Unite + arredondar o canto côncavo.
+         feGaussianBlur espalha o alfa; feColorMatrix devolve a borda nítida com um
+         degrau no canal alfa. Mais preciso que contrast() no canvas 2D, que simula
+         o limiar pelo contraste de COR e por isso depende da tinta. -->
+    <filter id="plc-goo" x="-20%" y="-20%" width="140%" height="140%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="0" result="b"/>
+      <!-- os valores reais são escritos pelo script, a partir das constantes -->
+      <feColorMatrix in="b" type="matrix" result="g"
+        values="1 0 0 0 0
+                0 1 0 0 0
+                0 0 1 0 0
+                0 0 0 14 -6.75"/>
+    </filter>
+  </defs>
+</svg>
+
+<div class="plc">
+  <div class="plc-topo"><span class="plc-palco">PALCO</span><span>Ato 01 — captura de gesto</span></div>
+
+  <div class="plc-cena" id="cena">
+    <video id="plc-video" playsinline muted></video>
+    <canvas id="tela"></canvas>
+    <div class="plc-relogio" id="relogio" hidden></div>
+    <div class="plc-fase" id="fase-hud" hidden></div>
+    <div class="plc-barra" id="barra" hidden></div>
+    <div class="plc-selo" id="selo" hidden>diagnóstico — dado cru visível</div>
+
+    <div class="plc-camada" id="c-repouso">
+      <div class="plc-legenda">Seu corpo não será filmado.<br>De tudo o que você fizer, <b>um gesto fica</b>.</div>
+      <div class="plc-btns">
+        <button class="plc-btn" id="b-camera">Ligar a câmera</button>
+        <button class="plc-btn fantasma" id="b-dedo">Desenhar com o dedo</button>
+      </div>
+    </div>
+
+    <div class="plc-camada" id="c-calibra" hidden>
+      <div class="plc-legenda" id="t-calibra">Carregando…</div>
+      <button class="plc-btn" id="b-gravar" hidden>Gravar gesto</button>
+    </div>
+
+    <div class="plc-camada" id="c-conta" hidden><div class="plc-conta" id="n-conta">3</div></div>
+
+    <div class="plc-camada" id="c-erro" hidden>
+      <div class="plc-erro" id="t-erro"></div>
+      <button class="plc-btn fantasma" id="b-dedo2">Desenhar com o dedo</button>
+    </div>
+  </div>
+
+  <div class="plc-ctrl" id="ctrl-fonte">
+    <div class="plc-fonte">
+      <span>Leitura</span>
+      <button class="plc-sw" id="f-mao" aria-pressed="true">Hands · palma</button>
+      <button class="plc-sw" id="f-pose" aria-pressed="false">Pose · pulsos</button>
+    </div>
+    <button class="plc-btn fantasma" id="b-diag" title="tecla D">Diagnóstico</button>
+  </div>
+
+  <div class="plc-ctrl" id="ctrl" hidden>
+    <button class="plc-btn" id="b-refazer">Refazer</button>
+  </div>
+
+  <div class="plc-diag" id="diag" hidden></div>
+
+  <div class="plc-nota">
+    Nada sai do seu aparelho: a leitura do corpo acontece no navegador e nenhuma imagem é enviada ou gravada.
+  </div>
+</div>
+
+<script type="module">
+const jsd = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.12";
+const $ = id => document.getElementById(id);
+const tela = $("tela"), ctx = tela.getContext("2d"), video = $("plc-video");
+const W = 960, H = 720, VIEW_MIN = Math.min(W, H);
+tela.width = W; tela.height = H;
+
+/* ===================== parâmetros =====================
+   Constantes medidas, não preferências. Ver spec §5. */
+
+/* --- arbitragem (§5.1): um ponto ativo por vez, o resto é silêncio visual ---
+
+   OS LIMIARES SÃO RELATIVOS AO CORPO, NÃO À TELA.
+   A §5.1 dá 110 e 45 px/s como validados, e eles são — para o enquadramento em
+   que foram medidos. Em quatro sessões reais o p10 da mão ficou entre 279 e 711
+   px/s: nenhum quadro abaixo de nenhum dos dois limiares. A máquina nunca fechava
+   um traço por pausa, só quando perdia o ponto, e cada episódio engolia quatro
+   gestos. Trocar 45 por 450 consertaria essa câmera e quebraria a próxima.
+   A largura de ombros dá a escala do corpo no quadro, então o mesmo gesto vale o
+   mesmo número perto ou longe da câmera. Com o corpo inteiro em quadro 4:3, os
+   ombros medem em torno de 110-150px — que é onde os 110 px/s da spec viram
+   ~1 largura de ombros por segundo. As constantes originais não foram
+   descartadas: foram traduzidas para a unidade em que elas são verdade.
+   ?escala=px volta ao comportamento antigo, para comparar. */
+const ESCALA_ATIVA = 1.00;   // larguras de ombro por segundo — abre o traço
+const ESCALA_PAUSA = 0.40;   // idem — abaixo disto o ponto está parando
+const OMBROS_REF   = 110;    // px de ombro no enquadramento de referência da §5.1
+const OMBROS_MIN   = 40, OMBROS_MAX = 700;   // sanidade
+const ESCALA_CORPO = !location.search.includes("escala=px");
+let ombros = OMBROS_REF;     // medido a cada quadro, suavizado
+const V_ATIVA_PX = 110, V_PAUSA_PX = 45;     // os números da §5.1, preservados
+const V_ATIVA = () => ESCALA_CORPO ? ESCALA_ATIVA*ombros : V_ATIVA_PX;
+const V_PAUSA = () => ESCALA_CORPO ? ESCALA_PAUSA*ombros : V_PAUSA_PX;
+const PAUSA_MS   = 200;   // tempo sustentado abaixo de V_PAUSA para fixar
+const ASSENTA_MS = 420;   // silêncio depois de fixar, antes do próximo candidato
+const JANELA_MS  = 120;   // janela sobre a qual a velocidade é medida
+const MEM_MS     = 600;   // memória do buffer de cada ponto monitorado
+const COMP_MIN   = 110;   // px de percurso — gesto curto demais não vira traço
+const RETRO      = 2;     // amostras de recuo ao abrir, para não começar atrasado
+
+/* --- a fronteira por VIRADA (§5.1, estendida) ---
+   A §5.1 fecha o episódio de um jeito só: 200ms abaixo de V_PAUSA. Numa sequência
+   de gestos encadeados a mão NUNCA para 200ms — ela inverte e emenda — e os
+   gestos todos caem num episódio só. Medido numa captura real de 3s: um episódio,
+   2482px de percurso para um arco de 297px (volta 8,1) e desvio de 37% do raio.
+   O ajuste devolveu um arco médio que não é nenhum dos gestos: uma linha só.
+   A fronteira que a pessoa EXECUTA é a inversão, não a parada. Ela é medida por
+   corda/caminho na janela: perto de 1 a mão passou reto ou em arco aberto; perto
+   de 0 ela voltou por onde veio. */
+const VIRADA_MS    = 170;   // janela em que a virada é procurada
+const VIRADA_RET   = 0.45;  // corda/caminho abaixo disto = voltou
+
+/* O PISO DA VIRADA sai de V_PAUSA, não de V_ATIVA — e essa troca conserta um
+   erro de raciocínio. A primeira versão exigia ~1 ombro/s de caminho na janela,
+   perto de V_ATIVA, com a ideia de que "só conta virada em gesto de verdade".
+   Mas a janela da virada é exatamente a janela em que a mão DESACELERA para
+   inverter: pedir velocidade alta ali é pedir que ela não vire. O gate se
+   autoanulava, e não em teoria — numa captura com ombros 675 ele exigia 715px/s
+   contra uma mediana de 492, e os 3 segundos inteiros viraram um episódio só, de
+   435° (mais de uma volta), desenhado como um arco de 161°.
+   O critério certo é o outro extremo: a mão precisa estar acima de PARADA. Se
+   ela está mais rápida que o limiar de pausa e a corda desabou contra o caminho,
+   ela virou. Abaixo disso quem manda é a regra de pausa, que é para isso. */
+const VIRADA_PISO  = 0.6;   // múltiplos de V_PAUSA sobre a janela
+const VIRADA_VOLTA = 0.02;  // excursão mínima do ápice, em larguras de ombro
+/* E o discriminador que substitui o piso alto: CAMINHO ÷ EXCURSÃO.
+   Uma inversão limpa vai até o ápice e volta — o caminho é duas vezes a
+   excursão, razão ~2. Tremor parado vai e volta muitas vezes no mesmo lugar:
+   excursão minúscula, caminho grande, razão 5, 10, 20. É por aqui que os dois
+   se separam, e não pela velocidade — porque na janela da virada a mão está
+   justamente PARANDO para inverter, e qualquer piso de velocidade rejeita os
+   quadros que interessam. Medido numa captura com ombros 675: no quadro da
+   inversão o caminho na janela era 45px contra um piso de 55, com a corda já
+   desabada em 0,11. A inversão estava lá e o piso a jogava fora. */
+const VIRADA_IDAS  = 3;
+const VIRADA_MIN = () => V_PAUSA()*VIRADA_PISO*VIRADA_MS/1000;
+const VIRADA_EXC = () => VIRADA_VOLTA*(ESCALA_CORPO ? ombros : OMBROS_REF);
+
+/* --- etapa 5.1 · a camada de inércia (§6, "ordem de construção", passo 5) ---
+   A §6 registra que a experiência ao vivo derrubou seis reconstruções, e registra
+   a correção em uma linha: arcos PERSISTEM (nascem, se refinam, nunca são
+   trocados), cálculo INCREMENTAL, e interpolação com INÉRCIA — "atraso desloca a
+   linha no tempo, o nervosismo chega inteiro, só que depois; o mecanismo correto
+   é ponta += (mão - ponta) * k".
+
+   Daqui em diante há duas geometrias para cada arco. A ALVO é o que as passadas
+   calculam — é ela que a coesão translada, que a regra das juntas apara e que o
+   enquadramento mede. A DESENHADA é a que aparece na tela, e ela persegue a alvo
+   sem nunca saltar para ela. Separar as duas é o que permite a composição se
+   reacomodar sem que nada pisque: quando um arco novo empurra os antigos, os
+   antigos DESLIZAM.
+
+   Nesta etapa nada de novo aparece: a captura continua terminando antes de
+   desenhar. O que muda é que o símbolo se monta em vez de surgir pronto, e o
+   estado de repouso tem de ser idêntico ao de antes, pixel a pixel.
+   ?anima=0 desliga, que é justamente como essa igualdade se confere. */
+/* A perseguição é por TEMPO, não por quadro. Escrita como k fixo por quadro,
+   ela ficava presa ao fps: k=0,12 dá 140ms de atraso a 60fps e 216ms a 38fps —
+   e a captura real roda a 38fps (114 quadros em 3s). Medido com k fixo, num
+   vaivém a 1300px/s, a mão ficava 250px na frente do traço (máx 373), contra
+   37px num gesto lento. Não era o ajuste errando: o caminho inteiro da mão
+   estava a 67px do arco. Era atraso puro, e ele crescia com a velocidade da
+   mão e caía com o fps — as duas coisas que não podem mandar nisso.
+   Com constante de tempo, k = 1 − e^(−dt/τ), o atraso é τ em qualquer máquina. */
+const INERCIA_TAU  = 70;     // ms — a constante de tempo da perseguição
+const INERCIA_PARA = 0.30;   // px de erro máximo abaixo do qual a animação assentou
+/* TETO DE VELOCIDADE, em espessuras por quadro. A perseguição exponencial dá o
+   passo MAIOR no primeiro quadro, que é justamente quando o erro é maior — e
+   quando um arco nasce longe, ele puxa o centroide e os antigos precisam andar
+   130px de uma vez. Medido sem teto: 15,9px num quadro, contra 5,9 de espessura.
+   Um traço que anda quase três vezes a própria espessura num quadro lê como
+   salto, e não saltar é a razão desta camada existir.
+   O teto preserva o exponencial onde ele importa (as correções pequenas do fim,
+   que assentam suaves) e limita só o começo dos deslocamentos grandes. Uma
+   espessura por quadro a 60fps são ~350px/s — menos da metade da velocidade
+   mediana da mão, então o traço nunca parece disparar. Expresso por segundo
+   pelo mesmo motivo que a inércia: um teto por quadro é mais apertado num
+   aparelho lento, que é justamente onde ele menos deveria apertar. */
+const INERCIA_TETO = 60;     // espessuras por SEGUNDO (era por quadro, mesmo defeito)
+const ANIMA = !location.search.includes("anima=0");
+const ENQUADRA_FIM = location.search.includes("enquadra=1");   // o zoom do fim
+const CONGELA = !location.search.includes("congela=0");        // o arco para onde a mão o deixou
+/* experimento: o arco fica com o RAIO DO PRÓPRIO GESTO, em vez da faixa de
+   raio da fonte (144–230px, fixa em pixels de TELA). A §5.5 fixa essa faixa
+   para o símbolo caber no quadro com ar — mas ela foi calibrada num
+   enquadramento em que o corpo inteiro aparecia, e com a mão perto da câmera os
+   gestos têm raio 300, 680. A compressão para 230 vira uma curva fechada no
+   lugar de uma varredura larga. ?raio=gesto liga. */
+const RAIO_DO_GESTO = location.search.includes("raio=gesto");
+/* CORRENTE: quando o arco vivo enche (chega no span mediano da fonte, 161°), o
+   episódio fecha ali e outro começa do mesmo ponto. Um gesto de 285° vira dois
+   arcos que se encontram, em vez de um arco de 161° com 124° de movimento sem
+   traço nenhum em cima. É como a Sens é construída — nenhum arco vai muito além
+   de 161°, eles se cruzam — e preserva o "ficou no lugar", porque o arco que
+   fecha não se mexe mais. ?corrente=1 liga. */
+const CORRENTE = location.search.includes("corrente=1");
+
+/* --- tempos (§5.6) --- */
+const CONTAGEM_MS = 3000;
+/* A §5.6 registra 5s, e que 3s "também foi testado; 5s deu resultado melhor".
+   Voltando para 3s por decisão da cliente. Aquele teste era outro sistema: Pose
+   em vez de Hands, limiares em px/s fixos, e sem o aparo de cauda — a comparação
+   que motivou os 5s não se aplica mais. */
+const CAPTURA_MS  = 3000;
+
+/* --- geometria (§5.5) — usada a partir da etapa 2, registrada aqui para não
+       ser re-derivada. raio = viewMin * (0,20 + norm * 0,12). --- */
+const R_BASE        = 0.20 * VIEW_MIN;
+const R_FAIXA       = 0.12 * VIEW_MIN;
+const WIDTH_RATIO   = 1/30;              // espessura = raio / 30 (1:18 da fonte fica gordo na tela)
+const MEDIAN_EXTENT = 161 * Math.PI/180;
+const JOINT_OVERSHOOT = 19 * Math.PI/180;
+const CROSSING_ANGLE  = 28 * Math.PI/180;
+const MAX_ARCOS       = 3;
+
+/* ===================== etapa 2 · redução a arcos =====================
+   §3: o traço NÃO é o caminho da mão. É um arco de círculo que o caminho da mão
+   determina. A trajetória é dado de entrada.
+   §5.2: ajuste por mínimos quadrados (Kåsa). Se o percurso não couber bem num
+   círculo só, parte em até 3 trechos. Nada de aleatoriedade, nada de templates:
+   centro, raio, início e extensão saem todos do ajuste, e cada arco fica na
+   posição espacial onde aquele trecho do gesto aconteceu. */
+const R_ARCO_MIN = 0.20 * VIEW_MIN;      // §5.5 — 144px
+const R_ARCO_MAX = 0.32 * VIEW_MIN;      // §5.5 — 230px
+/* "norm" da fórmula da §5.5 é o raio medido, posto numa faixa. Raios de gesto
+   entre 0,15 e 0,55 de viewMin cobrem o que as sessões reais produziram
+   (189 a 284px num viewMin de 720 = 0,26 a 0,39). */
+const NORM_LO = 0.15, NORM_HI = 0.55;
+const DEV_OK  = 0.10;     // desvio relativo bom o bastante por trecho
+/* Partir só paga se partir MELHORA MUITO. Sem isto, um gesto de passada única com
+   desvio de 8,5% contra um corte de 8% virava três arquinhos — que é o "carimbo
+   de arcos" da §6, rejeitado explicitamente pela cliente. Um arco a mais precisa
+   derrubar o pior trecho a 3/4 do que era; ganho marginal não compra arco. */
+const GANHO_MIN = 0.75;
+const SPAN_MIN_ARCO =  25 * Math.PI/180;
+const SPAN_MAX_ARCO = 210 * Math.PI/180; // a fonte não tem arco que se fecha
+const clamp01 = v => Math.max(0, Math.min(1, v));
+
+/* Um trecho da trajetória vira UM arco. O gesto diz onde, para que lado e quanto;
+   as proporções da Sens dizem com que raio isso é desenhado. */
+function arcoDeTrecho(p){
+  if (p.length < 4) return null;
+  const f = circulo(p);
+  if (!f || !isFinite(f.r) || f.r < 1) return null;
+  const spanBruto = spanDe(p, f);
+  const s = spanBruto >= 0 ? 1 : -1;
+  const ext = Math.min(SPAN_MAX_ARCO, Math.max(SPAN_MIN_ARCO, Math.abs(spanBruto)));
+
+  /* o raio do gesto entra na escala da fonte (§5.5), mas quem escolhe dentro da
+     faixa é a geometria medida — não um sorteio */
+  const norm = clamp01((f.r/VIEW_MIN - NORM_LO)/(NORM_HI - NORM_LO));
+  const R = RAIO_DO_GESTO ? f.r : R_ARCO_MIN + norm*(R_ARCO_MAX - R_ARCO_MIN);
+
+  /* "cada arco fica na posição espacial onde aquele trecho do gesto aconteceu":
+     o ponto médio do trecho fica PARADO, e o centro desliza ao longo do raio que
+     já passava por ele. Mudar o raio sem isso arrastaria o arco para longe do
+     movimento — que é o que "rearranjado em torno de um centro comum" descreve. */
+  const M = p[Math.floor(p.length/2)];
+  const d = Math.hypot(f.cx - M.x, f.cy - M.y) || 1;
+  const u = { x:(f.cx - M.x)/d, y:(f.cy - M.y)/d };
+  const c = { x: M.x + u.x*R, y: M.y + u.y*R };
+  const angM = Math.atan2(M.y - c.y, M.x - c.x);
+  const a0 = angM - s*ext/2;               // o arco fica centrado sobre o gesto
+
+  return { ox:c.x, oy:c.y, r:R, a0, s, span:ext,
+           /* o que o arco desenhado DESCARTOU do gesto, guardado para o
+              diagnóstico poder dizer por que um traço ficou longe do movimento:
+              o raio medido virou raio de fonte, e o span medido pode ter batido
+              no mínimo de 25° ou no teto de 210°. */
+           spanBruto: Math.abs(spanBruto),
+           spanPreso: Math.abs(spanBruto) < SPAN_MIN_ARCO ? "curto"
+                    : Math.abs(spanBruto) > SPAN_MAX_ARCO ? "longo" : null,
+           /* §5.3: a geometria original do ajuste, guardada para a regra das
+              juntas poder rodar quantas vezes quiser sem encolher o arco.
+              Guardada AGORA porque depois não dá para reconstituir. */
+           baseStart:a0, baseExtent:ext, baseOx:c.x, baseOy:c.y,
+           rGesto:f.r, devGesto:f.medio/f.r, nPts:p.length };
+}
+
+/* Quantos arcos? O menos que servir. Um trecho bom não compensa um ruim — os dois
+   viram linha na tela — então o critério é o PIOR trecho. */
+function reduzAArcos(pts){
+  const p = reamostra(pts);
+  if (p.length < 4) return [];
+  const base = parteEmK(p, 1);
+  if (!base) return [];
+  let escolha = { k:1, cortes:[], pior:base.pior };
+  /* O ganho é medido contra UM arco, e todos os k são olhados.
+     A versão gulosa comparava cada k com o k anterior e saía no primeiro que não
+     pagasse — e a escada pode ter o degrau do meio raso e o de baixo fundo. Foi
+     o que aconteceu na captura medida: 37,3% com 1 arco, 31,5% com 2 (não paga
+     contra 27,98), e o laço saía ali, sem nunca avaliar os 19,0% de 3 arcos, que
+     é metade do desvio de um arco só. O critério de "não virar carimbo" continua
+     inteiro: cada arco a mais tem de derrubar o pior trecho a GANHO_MIN^(k-1) do
+     que um arco dava — a exigência cresce com o número de arcos, não afrouxa. */
+  for (let k = 2; k <= MAX_ARCOS; k++){
+    if (base.pior < DEV_OK) break;                     // um arco já serve
+    const r = parteEmK(p, k);
+    if (!r) continue;
+    if (r.pior <= base.pior*Math.pow(GANHO_MIN, k-1) && r.pior < escolha.pior)
+      escolha = { k, cortes:r.cortes, pior:r.pior };
+  }
+  const n = p.length, idx = [0, ...escolha.cortes.map(a => Math.round(a*n)), n-1];
+  const arcos = [];
+  for (let i=0; i<idx.length-1; i++){
+    const trecho = p.slice(idx[i], idx[i+1]+1);
+    const a = arcoDeTrecho(trecho);
+    /* o trecho de gesto fica preso ao arco: é contra ELE que a fidelidade do
+       traço desenhado é medida, e sem isso não dá para dizer, olhando um arco
+       solto na tela, de qual pedaço de movimento ele veio. */
+    if (a){ a.trecho = trecho; arcos.push(a); }
+  }
+  return arcos;
+}
+
+/* ===================== etapa 4 · o filtro gooey =====================
+   §5.4. Os traços precisam SE FUNDIR nos cruzamentos, não apenas se sobrepor.
+   Alvo visual: dois traços finos se encontram, formam um pequeno bico levemente
+   engrossado, e voltam imediatamente a ser dois traços finos separados. Não é uma
+   bolha, não é uma estrela — é quase só um adoçamento do canto côncavo.
+   Na fonte: 196 cantos côncavos medidos, nenhum pontudo, todos com raio 0,75 da
+   espessura do traço.
+
+   GOO_BLUR_RATIO é o SIGMA DO BLUR DE ENTRADA, em múltiplos da espessura — NÃO o
+   raio do filete resultante. Usar 0,75 aqui, que é o raio medido do filete,
+   derrete o desenho num blob e as pontas somem. São coisas diferentes: o blur é a
+   causa, o filete é o efeito.
+   GOO_ALPHA_BIAS fica em −gain/2 para o corte cair em alfa 0,5. Ganho alto demais
+   (22) come a borda da linha: enfraquecida pelo blur, ela cai abaixo do corte e
+   desaparece — as pontas viram fantasma. */
+const GOO_BLUR_RATIO = 0.30;
+const GOO_ALPHA_GAIN = 14;
+/* A §5.4 dá −7 e explica a intenção: "manter ≈ −gain/2, para o corte cair em
+   alpha 0,5". Com ganho 14 e viés −7 a rampa leva alfa 0,5 → 0 e 0,571 → 1, então
+   o MEIO dela cai em 0,536, não em 0,5: o corte efetivo fica acima da borda
+   verdadeira e come uma fração de pixel de cada lado.
+   Medido, com soma de alfa subpixel numa composição fixa: viés −7 dá espessura
+   0,943 da original e ponta 0,674; −6,75 dá 0,993 e 0,755. O critério de
+   aceitação da §5.4 é a espessura aparente ficar IDÊNTICA, e −6,75 é o valor que
+   cumpre a intenção declarada. Não é contrariar a spec: é o número que faz o que
+   ela diz que o número deve fazer. */
+const GOO_ALPHA_BIAS = -6.75;
+/* GOO_FILETE — quanto a junta engorda, em espessuras de raio do disco de tinta
+   somado NO cruzamento antes do filtro. Como o GOO_BLUR_RATIO, é a CAUSA e não o
+   efeito: o filete resultante é bem menor que o disco, porque o cruzamento já
+   cobre boa parte dele (até 0,9 espessura o disco some inteiro dentro dos dois
+   traços).
+
+   Por que não simplesmente mais blur. Medido nesta composição de 8 arcos:
+   subir o ratio de 0,30 para 0,36 NÃO engorda a junta — derruba a tinta no
+   cruzamento 2,8%, a espessura 6,5%, e o alfa das pontas de 0,99 para 0,62. A
+   0,45 o desenho começa a desintegrar. E baixar o corte de alfa para compensar
+   engorda a LINHA INTEIRA, não a junta: corte 0,45 leva a espessura de 6,65 para
+   7,57px. O blur é global; o filete é local, e por isso precisa de tinta local.
+   Com o disco, a espessura medida fica IDÊNTICA (6,65px) e as pontas em 0,99,
+   enquanto a tinta no cruzamento sobe 12%.
+   Teto, olhando em escala cheia e não com zoom: a 1,2 já aparece um NÓ nos
+   cruzamentos rasos (os de ~28°, que são a mediana da fonte — ali a lente de
+   sobreposição é fina e comprida, e o disco escapa por cima e por baixo dela).
+   A 1,8, a bolha que a §5.4 rejeita por escrito.
+
+   EM ZERO POR DECISÃO DA CLIENTE. 1,0 foi testado e recusado: "as juntas estavam
+   melhores antes". A medição continua registrada porque ela vale por si — diz
+   que o blur não é o botão da junta e que o filete tem de ser local — mas o
+   desenho volta ao cruzamento limpo, que é o que a §5.4 descreve: dois traços
+   finos que se encontram e voltam a ser dois traços finos. */
+const GOO_FILETE = 0;
+const GOO_LIGADO = !location.search.includes("goo=0");
+
+/* DOIS canvas offscreen, não um.
+   A §5.4 manda aplicar o fade depois do filtro, no drawImage do offscreen para a
+   tela — e é o que parecia estar sendo feito. Mas medindo: com ctx.filter ligado,
+   o Chrome aplica globalAlpha ANTES da filtragem. O fade então entra como alfa
+   parcial na entrada do limiar e é apagado por ele, exatamente o gotcha que a
+   §5.4 descreve. Medido: alfa 0,6 sobrevive como 0,264 de tinta; 0,4 e 0,15 dão
+   ZERO. Com um canvas só não há como separar as duas coisas.
+   off  = os traços, alfa 1
+   off2 = o resultado já fundido, alfa 1 — e é ELE que vai para a tela com o fade */
+const off = document.createElement("canvas");
+off.width = W; off.height = H;
+const octx = off.getContext("2d");
+const off2 = document.createElement("canvas");
+off2.width = W; off2.height = H;
+const o2ctx = off2.getContext("2d");
+document.querySelector("#plc-goo feColorMatrix").setAttribute("values",
+  `1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 ${GOO_ALPHA_GAIN} ${GOO_ALPHA_BIAS}`);
+
+/* ===================== etapa 3 · a regra das juntas =====================
+   "Na fonte, a junta é o elemento primário e os arcos existem em função dela.
+    O arco não termina onde o gesto acabou: termina 19° depois de encostar em
+    outro." — 205 de 252 terminais do alfabeto morrem logo depois de cruzar.
+
+   A passada roda sobre a composição INTEIRA, não dentro de cada símbolo: dois
+   arcos de gestos diferentes se cruzam igual, e a junta não sabe de episódios.
+
+   IDEMPOTÊNCIA. Cada arco guarda baseStart/baseExtent desde o nascimento, e a
+   passada SEMPRE começa restaurando os dois. Sem isso, cada nova passada corta em
+   cima do corte anterior e os arcos encolhem até sumir — é o aviso literal da
+   §5.3, e é o motivo de a geometria original ser gravada no arcoDeTrecho. */
+const norm2pi = a => { a %= 2*Math.PI; return a < 0 ? a + 2*Math.PI : a; };
+/* quanto se avançou a partir de a0, no sentido s, até chegar em ang */
+const deslocamento = (a0, s, ang) => norm2pi(s*(ang - a0));
+
+function cruzaCirculos(c1, R1, c2, R2){
+  const dx = c2.x-c1.x, dy = c2.y-c1.y, d = Math.hypot(dx, dy);
+  if (d < 1e-9 || d > R1+R2 || d < Math.abs(R1-R2)) return [];
+  const t = (R1*R1 - R2*R2 + d*d)/(2*d), h2 = R1*R1 - t*t;
+  if (h2 < 0) return [];
+  const h = Math.sqrt(h2), mx = c1.x + dx*t/d, my = c1.y + dy*t/d;
+  return [{x: mx + h*(-dy)/d, y: my + h*dx/d}, {x: mx - h*(-dy)/d, y: my - h*dx/d}];
+}
+/* o ângulo entre dois arcos no cruzamento. Pela lei dos cossenos sobre os centros:
+   d² = R1² + R2² − 2·R1·R2·cos θ. A fonte mede mediana 28°, p25 9°, p75 37° —
+   cruzamentos RASOS, quase tangentes. Aqui é medido, não imposto: forçar o ângulo
+   era o que a versão anterior fazia, movendo o arco para longe do gesto. */
+function anguloCruzamento(a1, a2){
+  const d = Math.hypot(a2.ox-a1.ox, a2.oy-a1.oy);
+  const c = (a1.r*a1.r + a2.r*a2.r - d*d)/(2*a1.r*a2.r);
+  let th = Math.acos(Math.max(-1, Math.min(1, c)));
+  if (th > Math.PI/2) th = Math.PI - th;     // o ângulo agudo entre os traços
+  return th;
+}
+/* o ponto cai DENTRO do span angular do arco, não só sobre o círculo inteiro?
+   É a validação que a §5.3 exige, e sem ela um arco "cruza" outro do lado oposto
+   do círculo, onde não existe traço nenhum. */
+function offsetNoArco(a, P, folga = 1e-6){
+  const ang = Math.atan2(P.y - a.oy, P.x - a.ox);
+  const off = deslocamento(a.a0, a.s, ang);
+  return off <= a.span + folga ? off : null;
+}
+
+/* Os cruzamentos de uma lista de geometrias, seja ela a alvo ou a desenhada.
+   O filete da junta precisa disto: durante a animação os arcos ainda não estão
+   onde a regra das juntas os calculou, e um disco no ponto ANTIGO ficaria
+   flutuando solto no meio da tela. */
+function cruzamentosDe(geos){
+  const out = [];
+  for (let i=0; i<geos.length; i++)
+    for (let k=i+1; k<geos.length; k++){
+      const A = geos[i], B = geos[k];
+      if (!A || !B) continue;
+      for (const X of cruzaCirculos({x:A.ox,y:A.oy}, A.r, {x:B.ox,y:B.oy}, B.r))
+        if (offsetNoArco(A, X) != null && offsetNoArco(B, X) != null) out.push(X);
+    }
+  return out;
+}
+
+function applyCompositionJoints(arcos){
+  /* 1 · restaurar a geometria do ajuste. A passada é idempotente por causa disto. */
+  for (const a of arcos){
+    a.a0 = a.baseStart; a.span = a.baseExtent;
+    a.cruz = []; a.juntaIni = null; a.juntaFim = null; a.teto = false;
+  }
+
+  /* 2 · todos os cruzamentos válidos, calculados sobre a geometria BASE — assim o
+        resultado não depende da ordem em que os arcos são cortados. */
+  for (let i=0; i<arcos.length; i++)
+    for (let k=i+1; k<arcos.length; k++){
+      const A = arcos[i], B = arcos[k];
+      for (const X of cruzaCirculos({x:A.ox,y:A.oy}, A.r, {x:B.ox,y:B.oy}, B.r)){
+        const oA = offsetNoArco(A, X), oB = offsetNoArco(B, X);
+        if (oA == null || oB == null) continue;     // fora do traço de um dos dois
+        const th = anguloCruzamento(A, B);
+        A.cruz.push({ off:oA, com:k, ponto:X, ang:th });
+        B.cruz.push({ off:oB, com:i, ponto:X, ang:th });
+      }
+    }
+
+  /* 3 · CADA TERMINAL DECIDE SOZINHO.
+        205 de 252 terminais morrem numa junta, mas 47 terminam soltos no espaço,
+        e a §5.3 diz para não forçar todo arco a cruzar. Aparar as duas pontas
+        contra os cruzamentos extremos faz um único cruzamento puxar as duas
+        pontas para cima dele: um arco de 160° com um cruzamento perto da ponta
+        vira um toco de 38°. O cruzamento pertence ao terminal mais próximo dele;
+        o outro terminal fica livre.
+        Só encurta: a §5.3 diz CORTE 19° além dela, não estique até lá. */
+  for (const a of arcos){
+    a.cruz.sort((x,y) => x.off - y.off);
+    const meio = a.span/2;
+    const primeiro = a.cruz[0], ultimo = a.cruz[a.cruz.length-1];
+    let ini = 0, fim = a.span, jIni = null, jFim = null;
+
+    if (primeiro && primeiro.off < meio){
+      ini = Math.max(0, primeiro.off - JOINT_OVERSHOOT); jIni = primeiro;
+    }
+    if (ultimo && ultimo.off > meio){
+      fim = Math.min(a.span, ultimo.off + JOINT_OVERSHOOT); jFim = ultimo;
+    }
+
+    /* 4 · teto de 161° — o span mediano da fonte — aparando SÓ a ponta livre.
+          A junta é o elemento primário: onde ela manda, a medida dela é exata e o
+          teto não a desloca. Se as duas pontas morrem em junta, a junta vence. */
+    let ext = fim - ini;
+    if (ext > MEDIAN_EXTENT && !(jIni && jFim)){
+      const sobra = ext - MEDIAN_EXTENT;
+      if (!jIni && !jFim){ ini += sobra/2; fim -= sobra/2; }
+      else if (!jIni)    { ini += sobra; }
+      else               { fim -= sobra; }
+      a.teto = true;
+      ext = fim - ini;
+    }
+    if (ext < SPAN_MIN_ARCO) continue;           // cortar aqui apagaria o arco
+    a.a0 = a.baseStart + a.s*ini;
+    a.span = ext;
+    if (jIni) a.juntaIni = { com:jIni.com, ang:jIni.ang, avanco: jIni.off - ini };
+    if (jFim) a.juntaFim = { com:jFim.com, ang:jFim.ang, avanco: fim - jFim.off };
+  }
+  return arcos;
+}
+
+/* ===================== etapa 5 · coesão =====================
+   PEDIDO DA CLIENTE, e ele contraria uma linha da spec — vale dizer qual e por
+   quê. A §5.2 fecha com "cada arco fica na posição espacial onde aquele trecho do
+   gesto aconteceu — nunca rearranjado em torno de um centro comum". Aquela frase
+   existe contra os templates da §6, em que o gesto entrava só como semente e a
+   pessoa não reconhecia nada do próprio movimento. O que ela protege é a
+   PROVENIÊNCIA: raio, extensão, sentido e orientação saem do gesto.
+   Esta passada não toca em nada disso. Ela só translada arcos inteiros, rígidos,
+   para fechar os vazios entre eles. Cada arco continua sendo exatamente o arco
+   que aquele trecho do gesto determinou; o que muda é a distância entre eles.
+   A diferença importa porque o alvo mudou: não é registrar um gesto, é devolver
+   um símbolo — e símbolo é coisa conexa. Na Sens, 205 de 252 terminais morrem
+   numa junta; arcos que não se encostam não fazem letra nenhuma.
+   DESLIGADA POR ORA, a pedido da cliente: com o traço ao vivo, ver os arcos já
+   assentados deslizarem uns na direção dos outros logo depois de cada gesto
+   ficou estranho — o que numa imagem estática fecha a composição, em movimento
+   parece que o desenho está se remexendo sozinho. A passada fica inteira e
+   testada; ?coesao=1 traz de volta. Se voltar, o lugar para mexer é o momento:
+   apertar uma vez só no fim, e não a cada gesto. */
+const COESAO_LIGADA  = location.search.includes("coesao=1");
+const COESAO_PUXA    = 0.35;  // fração do vazio até o centroide — o aperto geral
+const COESAO_MORDIDA = 1.20;  // espessuras de penetração ao encostar dois arcos.
+                              /* encostar não basta: tangência não gera cruzamento
+                                 dentro do span dos dois, e sem cruzamento a regra
+                                 das juntas não tem onde rodar e o gooey tem pouco
+                                 o que fundir. A mordida garante traços que se
+                                 ATRAVESSAM, que é o que a fonte faz. */
+const COESAO_CONTATO = 0.60;  // espessuras de folga que já contam como encostado
+
+/* menor distância entre os dois arcos DESENHADOS (não entre os círculos inteiros:
+   dois círculos podem se cortar num lugar onde nenhum dos dois tem traço). */
+function folgaEntre(A, B, N = 48){
+  const pa = pontosDoArco(A, N), pb = pontosDoArco(B, N);
+  let d2 = Infinity, qa = null, qb = null;
+  for (const u of pa) for (const v of pb){
+    const dd = (u.x-v.x)*(u.x-v.x) + (u.y-v.y)*(u.y-v.y);
+    if (dd < d2){ d2 = dd; qa = u; qb = v; }
+  }
+  return { d: Math.sqrt(d2), a:qa, b:qb };
+}
+
+function aproxima(arcos, esp){
+  const relato = { puxa:0, passos:[], grupos:1 };
+  /* idempotência, pelo mesmo motivo da §5.3: a composição cresce durante a
+     captura e a passada roda de novo a cada arco que nasce. Sem restaurar o
+     centro, cada passada aperta em cima do aperto anterior e a composição implode.
+
+     O SPAN também é restaurado, e isso não é zelo: folgaEntre mede sobre o arco
+     desenhado, e depois de uma passada de juntas o arco está APARADO. Medir a
+     folga entre dois tocos dá uma distância maior que a real, e a coesão
+     aproxima demais. Sem esta linha o resultado dependia de quantas vezes as
+     passadas tinham rodado antes — invisível enquanto elas rodavam uma vez só,
+     no fim da captura; determinante agora que rodam a cada gesto. A coesão
+     decide sobre o arco INTEIRO; aparar é decisão da passada seguinte. */
+  for (const a of arcos){
+    a.ox = a.baseOx; a.oy = a.baseOy;
+    a.a0 = a.baseStart; a.span = a.baseExtent;
+  }
+  if (!COESAO_LIGADA || arcos.length < 2) return relato;
+
+  /* 1 · o aperto geral. Todo arco anda a mesma fração do seu vazio até o
+        centroide da composição: as distâncias relativas são preservadas, a
+        composição inteira só fica mais junta. É isto que dá o ar de símbolo em
+        vez de três gestos espalhados pela tela. */
+  let cx = 0, cy = 0;
+  for (const a of arcos){ cx += a.ox; cy += a.oy; }
+  cx /= arcos.length; cy /= arcos.length;
+  for (const a of arcos){
+    relato.puxa = Math.max(relato.puxa, Math.hypot(cx-a.ox, cy-a.oy)*COESAO_PUXA);
+    a.ox += (cx - a.ox)*COESAO_PUXA;
+    a.oy += (cy - a.oy)*COESAO_PUXA;
+  }
+
+  /* 2 · a conexão forçada. O aperto sozinho não garante nada: dois gestos em
+        cantos opostos continuam sem se tocar. Enquanto houver mais de um grupo
+        solto, o par mais próximo entre grupos diferentes é fechado, e os dois
+        GRUPOS INTEIROS andam — nunca um arco sozinho, senão o que já estava
+        conectado se desfaz. Anda mais quem tem menos arcos. */
+  const contato = esp*COESAO_CONTATO;
+  const pai = arcos.map((_, i) => i);
+  const acha = i => pai[i] === i ? i : (pai[i] = acha(pai[i]));
+  const religa = () => {
+    for (let i=0; i<arcos.length; i++) pai[i] = i;
+    for (let i=0; i<arcos.length; i++)
+      for (let k=i+1; k<arcos.length; k++)
+        if (folgaEntre(arcos[i], arcos[k]).d <= contato){
+          const A = acha(i), B = acha(k); if (A !== B) pai[A] = B;
+        }
+  };
+  religa();
+
+  for (let guarda = 0; guarda < arcos.length; guarda++){
+    const grupos = new Map();
+    for (let i=0; i<arcos.length; i++){
+      const r = acha(i);
+      if (!grupos.has(r)) grupos.set(r, []);
+      grupos.get(r).push(i);
+    }
+    relato.grupos = grupos.size;
+    if (grupos.size <= 1) break;
+
+    let melhor = null;
+    for (let i=0; i<arcos.length; i++)
+      for (let k=i+1; k<arcos.length; k++){
+        if (acha(i) === acha(k)) continue;
+        const f = folgaEntre(arcos[i], arcos[k]);
+        if (!melhor || f.d < melhor.d) melhor = { ...f, i, k };
+      }
+    if (!melhor) break;
+
+    const gi = grupos.get(acha(melhor.i)), gk = grupos.get(acha(melhor.k));
+    let vx = melhor.b.x - melhor.a.x, vy = melhor.b.y - melhor.a.y;
+    const d = Math.hypot(vx, vy);
+    if (d < 1e-6){ vx = 1; vy = 0; } else { vx /= d; vy /= d; }
+    const anda = melhor.d + esp*COESAO_MORDIDA;
+    const w = gk.length/(gi.length + gk.length);        // o grupo menor anda mais
+    for (const j of gi){ arcos[j].ox += vx*anda*w;       arcos[j].oy += vy*anda*w; }
+    for (const j of gk){ arcos[j].ox -= vx*anda*(1-w);  arcos[j].oy -= vy*anda*(1-w); }
+    relato.passos.push({ i:melhor.i, k:melhor.k, folga:melhor.d, anda });
+    religa();
+  }
+  const g = new Set(); for (let i=0; i<arcos.length; i++) g.add(acha(i));
+  relato.grupos = g.size;
+  return relato;
+}
+
+/* ===================== fontes de leitura =====================
+   A §2 deixa em aberto Pose (pulsos) ou Hands (ponta do indicador). As duas
+   entram aqui atrás da mesma interface: le() devolve [{i, x, y}] em coordenadas
+   normalizadas e NÃO espelhadas. O espelhamento é uma linha só, adiante. */
+const FONTES = {
+  pose: {
+    id:"pose", rotulo:"Pose · pulsos", modelo:"pose_landmarker_lite",
+    /* A cabeça saiu da lista. Medido em sessão real: venceu 3 de 5 episódios e um
+       deles foi aceito (111px, raspando o mínimo). Ela é o ponto mais estável do
+       quadro — visibilidade 1.00, visto em 288 de 288 quadros — então ganha a
+       corrida de "quem se move primeiro" toda vez que os pulsos piscam, e o traço
+       que sai é o pescoço da pessoa. A lista segue editável: para incluir os
+       cotovelos, acrescente {nome:"cotovelo dir", lm:14} e {nome:"cotovelo esq", lm:13}. */
+    pontos:[ {nome:"pulso dir", lm:16}, {nome:"pulso esq", lm:15} ],
+    dica:"Afaste-se até aparecer o corpo inteiro.",
+    async cria(fs, delegate){
+      const { PoseLandmarker } = this.mod;
+      return PoseLandmarker.createFromOptions(fs, {
+        baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task", delegate },
+        runningMode:"VIDEO", numPoses:1 });
+    },
+    le(r){
+      const lm = r && r.landmarks && r.landmarks[0];
+      if (!lm) return null;                     // null = nenhuma pose neste quadro
+      const out = [];
+      this.pontos.forEach((p, i) => {
+        const q = lm[p.lm];
+        if (!q) return;
+        out.push({i, x:q.x, y:q.y, vis: q.visibility == null ? 1 : q.visibility});
+      });
+      return out;                               // [] = pose lida, nenhum ponto reportado
+    },
+    /* todos os landmarks, só para o desenho de diagnóstico */
+    cru(r){ const lm = r && r.landmarks && r.landmarks[0]; return lm || null; },
+    /* escala do corpo no quadro: distância entre os ombros (11 e 12) */
+    escala(r){
+      const lm = r && r.landmarks && r.landmarks[0];
+      if (!lm || !lm[11] || !lm[12]) return null;
+      const a = lm[11], b = lm[12];
+      if ((a.visibility != null && a.visibility < 0.5) ||
+          (b.visibility != null && b.visibility < 0.5)) return null;
+      return Math.hypot((a.x-b.x)*W, (a.y-b.y)*H);
+    }
+  },
+  mao: {
+    id:"mao", rotulo:"Hands · palma", modelo:"hand_landmarker",
+    /* A ponta do indicador (landmark 8) era o pior lugar possível: é o ponto mais
+       ARTICULADO da mão — move quando o dedo dobra, não só quando o braço move —
+       e o primeiro a sair do quadro ou ser encoberto. A parte rígida é a palma.
+       PALMA é o centroide do punho e das bases dos quatro dedos: cinco pontos que
+       não dependem de dedo dobrado, e cuja média reduz o tremor por √5.
+       Os nomes são A e B, não direita e esquerda: o handedness do MediaPipe é
+       medido na imagem crua, e a cena aqui é espelhada — rotular seria mentir. */
+    pontos:[ {nome:"mão A", mao:"Right"}, {nome:"mão B", mao:"Left"} ],
+    dica:"Levante uma das mãos, com a palma para a câmera.",
+    async cria(fs, delegate){
+      const { HandLandmarker } = this.mod;
+      return HandLandmarker.createFromOptions(fs, {
+        baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate },
+        runningMode:"VIDEO", numHands:2 });
+    },
+    le(r){
+      if (!r || !r.landmarks) return null;
+      if (!r.landmarks.length) return [];
+      const out = [];
+      r.landmarks.forEach((mao, k) => {
+        const lado = r.handedness && r.handedness[k] && r.handedness[k][0]
+                   ? r.handedness[k][0].categoryName : (k === 0 ? "Right" : "Left");
+        const i = this.pontos.findIndex(p => p.mao === lado);
+        if (i < 0) return;
+        if (out.some(o => o.i === i)) return;   // uma leitura por slot
+        const q = this.palma(mao);
+        if (!q) return;
+        out.push({i, x:q.x, y:q.y, vis:1});      // Hands não reporta visibility
+      });
+      return out;
+    },
+    PALMA: [0, 5, 9, 13, 17],               // punho + bases do indicador ao mínimo
+    palma(m){
+      let x=0, y=0, n=0;
+      for (const k of this.PALMA){ const q = m[k]; if (!q) continue; x+=q.x; y+=q.y; n++; }
+      return n >= 3 ? {x:x/n, y:y/n} : null;   // menos de 3 pontos: leitura não confiável
+    },
+    cru(r){ return (r && r.landmarks && r.landmarks[0]) || null; },
+    /* a mão não tem ombros: o punho (0) até a base do dedo médio (9) é a medida
+       estável da mão no quadro. Vale cerca de um quarto da largura de ombros, e
+       é por isso que ela é multiplicada por 4 — para os dois modos falarem a
+       mesma unidade e as constantes valerem para os dois. */
+    escala(r){
+      const m = r && r.landmarks && r.landmarks[0];
+      if (!m || !m[0] || !m[9]) return null;
+      return 4 * Math.hypot((m[0].x-m[9].x)*W, (m[0].y-m[9].y)*H);
+    }
+  }
+};
+/* Hands é o padrão: escolhido por medição e por uso. Nas sessões de teste o pulso
+   deu visibilidade máxima de 0,68 e mais de metade das amostras eram salto do
+   rastreador; a mão, vista de perto, é estável. E é assim que as pessoas vão usar
+   — sentadas diante do computador ou segurando o celular, não a dois metros da
+   câmera com o corpo inteiro em quadro. Pose continua alcançável no seletor. */
+let fonte = FONTES.mao;
+const MONITORADOS = () => fonte.pontos;
+const nomeDe = i => i < 0 ? "dedo" : (fonte.pontos[i] ? fonte.pontos[i].nome : "?");
+
+/* ===================== estado ===================== */
+let estado = "repouso", modoDedo = false;
+let buf = [];                 // {x,y,t} por ponto monitorado — só alimenta a arbitragem
+let ativo = null;             // o episódio que está sendo puxado agora
+let fase = "procurando";      // procurando | ativo | assentando
+let assentaAte = 0;
+let retomada = -1;            // ponto que acabou de virar: abre do ápice, não de RETRO
+let episodios = [];           // tudo que aconteceu, aceito ou não
+let composicao = [];          // os arcos do resultado (etapa 2)
+let coesao = null;            // relato da passada de coesão (etapa 5)
+let moldura = {k:1, dx:0, dy:0};      // o enquadramento ALVO
+let molduraDes = null;                // o desenhado, quando a inércia está em curso
+let silenciados = [];
+let vAgora = [];              // velocidade por ponto, para o HUD
+let leituraAtual = [], cruAtual = null, escalaAtual = null;
+let detector = null, delegateUsado = "—", relogio = 0;
+
+const VIS_MIN = 0.5;          // corte de visibilidade do MediaPipe
+
+/* CORTE DE SALTO. Medido em sessão real: picos de 6398 e 7487 px/s no pulso e
+   1443 px/s na CABEÇA — 768px em 120ms, seis larguras de cena por segundo. Não é
+   braço: é o rastreador trocando de ideia sobre onde o ponto está.
+   Isto NÃO é o "filtro por limiar de velocidade simples" da §6: aquele escolhia
+   que pedaços do gesto viravam desenho, e por isso o registro inteiro virava uma
+   rajada só. Este é um corte de validade da amostra, irmão do corte de
+   visibilidade: leitura que o rastreador errou não entra no buffer. Nada aqui
+   decide o que é desenhado.
+   Um salto que PERSISTE é realocação de verdade (a pessoa trocou de braço, saiu
+   e voltou): depois de SALTO_SEGUIDOS amostras seguidas acima do teto, a leitura
+   é aceita e o buffer recomeça dali. Desliga com ?salto=0, para comparar. */
+/* O teto era 3500 px/s, escolhido por intuição — e a medição derrubou: numa
+   sessão real o p50 do pulso esquerdo deu 4039 px/s. O teto estava ABAIXO DA
+   MEDIANA e rejeitava 64 de 135 amostras daquele pulso. Cortava o gesto.
+   Pior: nos dados reais não há separação limpa entre gesto e artefato
+   (p90 6398 contra p99 16057 — 2,5×; num sintético limpo a razão é 75×). Sem
+   separação, não existe teto que corte só o erro.
+   Então o teto deixa de ser filtro de ruído e vira o que pode ser de verdade:
+   um corte do indefensável. Quem tira tremor e ziguezague é o ajuste de círculo
+   da etapa 2 (§3) — não este gate. Expresso em larguras de cena por segundo,
+   para não depender de quanto do quadro o corpo ocupa. */
+const SALTO_LARGURAS = 18;
+const V_SALTO = SALTO_LARGURAS * W;   // 17280 px/s
+const SALTO_SEGUIDOS = 3;
+const CORTA_SALTO = !location.search.includes("salto=0");
+const saude = { quadros:0, comPose:0, comLeitura:0, semLeitura:0, erros:0, ultimoErro:"", t0:0, t1:0,
+                quadrosAtivos:0, quadrosSilenciando:0, maxSimultaneos:0, porPonto:[] };
+/* por ponto monitorado: quantos quadros ele foi visto, quantos foram recusados
+   pelo corte de visibilidade, e o pico de velocidade que ele alcançou. É o que
+   separa "a pose não foi lida" de "o pulso estava fora do quadro" de "o gesto
+   foi lento demais" — três causas que, juntas, viram um silêncio só. */
+function zeraPontos(){
+  saude.porPonto = MONITORADOS().map(() => ({ visto:0, recusadoVis:0, vPico:0, visMax:0,
+                                              salto:0, saltoSeq:0, vBruto:0, vs:[] }));
+}
+
+function limpaBuffers(){ buf = MONITORADOS().map(() => []); }
+
+/* ===================== medidas de trajetória ===================== */
+function percurso(pts){
+  let c = 0;
+  for (let i=1; i<pts.length; i++) c += Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y);
+  return c;
+}
+/* amplitude = maior distância entre dois pontos do episódio. Um vaivém pode ter
+   600px de percurso e 40px de amplitude: é agitação, não gesto. */
+function amplitude(pts){
+  let m = 0;
+  for (let i=0; i<pts.length; i++) for (let j=i+1; j<pts.length; j++)
+    m = Math.max(m, Math.hypot(pts[j].x-pts[i].x, pts[j].y-pts[i].y));
+  return m;
+}
+/* ---- ajuste de círculo (Kåsa, §5.2) — AQUI SÓ COMO MEDIÇÃO ----
+   Nada disto desenha nada: é a etapa 2 que usa o ajuste para produzir o arco.
+   O que entra agora é a pergunta que decide se a etapa 2 é viável com esta
+   captura: o caminho da mão CABE num círculo? O desvio médio responde. Se ele
+   for uma fração pequena do raio, a §3 se sustenta — o tremor morre no ajuste, e
+   não importa que a trajetória crua seja nervosa. Se for da ordem do raio, o
+   gesto não é circular e nenhum arco vai representá-lo. */
+function reamostra(pts, passo = 8){
+  if (pts.length < 2) return pts.map(p => ({x:p.x, y:p.y}));
+  const out = [{x:pts[0].x, y:pts[0].y}];
+  for (let i=1; i<pts.length; i++){
+    let a = out[out.length-1], b = pts[i], d = Math.hypot(b.x-a.x, b.y-a.y);
+    while (d >= passo){
+      const t = passo/d, n = {x:a.x+(b.x-a.x)*t, y:a.y+(b.y-a.y)*t};
+      out.push(n); a = n; d = Math.hypot(b.x-a.x, b.y-a.y);
+    }
+  }
+  const u = pts[pts.length-1], v = out[out.length-1];
+  if (Math.hypot(u.x-v.x, u.y-v.y) > 0.5) out.push({x:u.x, y:u.y});
+  return out;
+}
+function circulo(pts){
+  const n = pts.length;
+  if (n < 3) return null;
+  let sx=0, sy=0, sxx=0, syy=0, sxy=0, sxz=0, syz=0, sz=0;
+  for (const p of pts){
+    const z = p.x*p.x + p.y*p.y;
+    sx+=p.x; sy+=p.y; sxx+=p.x*p.x; syy+=p.y*p.y; sxy+=p.x*p.y; sxz+=p.x*z; syz+=p.y*z; sz+=z;
+  }
+  const A = [[2*sxx,2*sxy,sx],[2*sxy,2*syy,sy],[2*sx,2*sy,n]], b = [sxz,syz,sz];
+  const D = M => M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+               - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+               + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+  const det = D(A);
+  if (Math.abs(det) < 1e-9) return null;
+  const sub = c => { const M = A.map(r => r.slice()); for (let i=0;i<3;i++) M[i][c] = b[i]; return D(M)/det; };
+  const cx = sub(0), cy = sub(1), cc = sub(2);
+  const r = Math.sqrt(Math.max(0, cc + cx*cx + cy*cy));
+  if (!isFinite(r) || !isFinite(cx) || !isFinite(cy)) return null;
+  let soma = 0;
+  for (const p of pts) soma += Math.abs(Math.hypot(p.x-cx, p.y-cy) - r);
+  return {cx, cy, r, medio: soma/n};
+}
+/* o ângulo varrido em torno do centro. Somado com sinal, o ziguezague se cancela:
+   é a diferença entre "quanto a mão andou" e "quanto de arco isso vale". */
+function spanDe(pts, c){
+  const ang = q => Math.atan2(q.y-c.cy, q.x-c.cx);
+  let acc = 0, ant = ang(pts[0]);
+  for (let i=1; i<pts.length; i++){
+    let d = ang(pts[i]) - ant;
+    while (d >  Math.PI) d -= 2*Math.PI;
+    while (d < -Math.PI) d += 2*Math.PI;
+    acc += d; ant += d;
+  }
+  return acc;
+}
+/* A §5.2 manda partir em até 3 trechos quando o percurso não cabe num círculo só.
+   Isto MEDE essa prescrição contra a captura real, antes de a etapa 2 ser escrita:
+   qual o desvio com 1, 2 e 3 arcos? Se 3 trechos derrubam o desvio para baixo de
+   10%, a etapa 2 funciona como especificada. Se não derrubam, o episódio é longo
+   demais — está engolindo várias passadas da mão — e o problema é de arbitragem,
+   não de geometria. Medir antes de escolher qual dos dois consertar. */
+function ajustaTrecho(p){
+  if (p.length < 4) return null;
+  const f = circulo(p);
+  if (!f || !isFinite(f.r) || f.r < 1) return null;
+  return { r:f.r, desvio:f.medio, rel:f.medio/f.r, span:Math.abs(spanDe(p, f)), n:p.length };
+}
+/* pior desvio relativo entre os trechos, que é o que decide — um trecho bom não
+   compensa um ruim: os dois viram linha na tela. */
+function piorDe(trechos){
+  let pior = 0;
+  for (const t of trechos){ if (!t) return Infinity; pior = Math.max(pior, t.rel); }
+  return pior;
+}
+function parteEmK(p, k){
+  const n = p.length;
+  if (k === 1){ const f = ajustaTrecho(p); return f ? {pior:f.rel, cortes:[]} : null; }
+  let melhor = null;
+  const passo = 0.05, min = 0.15;
+  if (k === 2){
+    for (let a=min; a<=1-min; a+=passo){
+      const i = Math.round(a*n);
+      const r = piorDe([ajustaTrecho(p.slice(0,i+1)), ajustaTrecho(p.slice(i))]);
+      if (!melhor || r < melhor.pior) melhor = {pior:r, cortes:[+a.toFixed(2)]};
+    }
+  } else {
+    for (let a=min; a<=1-2*min; a+=passo)
+      for (let b=a+min; b<=1-min; b+=passo){
+        const i = Math.round(a*n), j = Math.round(b*n);
+        const r = piorDe([ajustaTrecho(p.slice(0,i+1)), ajustaTrecho(p.slice(i,j+1)), ajustaTrecho(p.slice(j))]);
+        if (!melhor || r < melhor.pior) melhor = {pior:r, cortes:[+a.toFixed(2), +b.toFixed(2)]};
+      }
+  }
+  return melhor;
+}
+
+/* O traço fecha 200ms DEPOIS de a mão parar (histerese da §5.1, que existe para
+   o traço não piscar). Essas amostras finais estão paradas e tremendo no mesmo
+   lugar: entram no ajuste como um aglomerado denso e puxam o círculo inteiro.
+   Num arco limpo de uma passada só isso levou o desvio de ~3% para 21,8%.
+   O aparo tira do AJUSTE o que a histerese precisou manter na MÁQUINA — são
+   propósitos diferentes para o mesmo dado. */
+function aparaCauda(pts, vMin){
+  if (pts.length < 8) return pts;
+  const jan = Math.max(2, Math.round(JANELA_MS/16.7));
+  let fim = pts.length - 1;
+  while (fim > jan + 3){
+    const a = pts[fim - jan], b = pts[fim];
+    const dt = (b.t - a.t)/1000;
+    if (dt <= 0) break;
+    if (Math.hypot(b.x-a.x, b.y-a.y)/dt >= vMin) break;
+    fim--;
+  }
+  let ini = 0;
+  while (ini < fim - jan - 3){
+    const a = pts[ini], b = pts[ini + jan];
+    const dt = (b.t - a.t)/1000;
+    if (dt <= 0) break;
+    if (Math.hypot(b.x-a.x, b.y-a.y)/dt >= vMin) break;
+    ini++;
+  }
+  return pts.slice(ini, fim + 1);
+}
+
+function medeAjuste(pts){
+  const p = reamostra(pts);
+  if (p.length < 4) return null;
+  const f = circulo(p);
+  if (!f || !isFinite(f.r) || f.r < 1) return null;
+  const span = spanDe(p, f);
+  const arco = f.r*Math.abs(span);
+  let comp = 0;
+  for (let i=1; i<p.length; i++) comp += Math.hypot(p[i].x-p[i-1].x, p[i].y-p[i-1].y);
+  const k2 = parteEmK(p, 2), k3 = parteEmK(p, 3);
+  return { r:f.r, desvio:f.medio, rel:f.medio/f.r, span:Math.abs(span),
+           arco, n:p.length,
+           /* quantas vezes a mão andou o comprimento do arco. Perto de 1 = uma
+              passada só. 4, 10 = vaivém: o episódio engoliu vários gestos. */
+           volta: arco > 1 ? comp/arco : null,
+           rel2: k2 ? k2.pior : null, rel3: k3 ? k3.pior : null,
+           cortes3: k3 ? k3.cortes : null };
+}
+
+function velocidade(b, agora){
+  if (!b || b.length < 2) return 0;
+  const fim = b[b.length-1];
+  if (agora - fim.t > 2*MEM_MS) return 0;
+  let ini = b[0];
+  for (let k=b.length-1; k>=0; k--){ ini = b[k]; if (fim.t - b[k].t >= JANELA_MS) break; }
+  const dt = fim.t - ini.t;
+  /* a janela precisa EXISTIR para valer. Com o buffer recém-zerado (saída do
+     assentamento, início da captura) sobram duas amostras a 16ms uma da outra:
+     o tremor de captura de 2px vira 240 px/s e o braço parado se candidata a si
+     mesmo. Enquanto não houver janela, o ponto não é candidato — são ~120ms de
+     aquecimento, e o buffer já vem cheio quando o gesto de verdade começa. */
+  if (dt < JANELA_MS*0.6) return 0;
+  return Math.hypot(fim.x-ini.x, fim.y-ini.y)/(dt/1000);
+}
+
+/* A virada, medida sobre o buffer cru do ponto ativo.
+   Devolve o ÁPICE — a amostra mais distante do começo da janela — e não o fim
+   dela: quando a virada é detectada a mão já andou um pedaço do gesto seguinte,
+   e esse pedaço não pode entrar no episódio que está fechando. */
+function viradaEm(b){
+  if (!b || b.length < 4) return null;
+  const fim = b[b.length-1];
+  let k = b.length-1;
+  while (k > 0 && fim.t - b[k-1].t <= VIRADA_MS) k--;
+  if (fim.t - b[k].t < VIRADA_MS*0.6) return null;      // a janela ainda não existe
+  let caminho = 0;
+  for (let i=k+1; i<b.length; i++) caminho += Math.hypot(b[i].x-b[i-1].x, b[i].y-b[i-1].y);
+  if (caminho < VIRADA_MIN()) return null;              // a mão está parando, não virando
+  if (Math.hypot(fim.x-b[k].x, fim.y-b[k].y)/caminho > VIRADA_RET) return null;
+  let ape = k, dm = -1;
+  for (let i=k; i<b.length; i++){
+    const d = Math.hypot(b[i].x-b[k].x, b[i].y-b[k].y);
+    if (d > dm){ dm = d; ape = i; }
+  }
+  if (ape === k || ape === b.length-1) return null;     // ainda não voltou
+  /* e a mão precisa ter IDO a algum lugar antes de voltar. Sem isto, com o piso
+     baixo, tremor parado tem corda pequena sobre caminho grande e passa por
+     virada — vai e volta dois pixels muitas vezes. */
+  if (dm < VIRADA_EXC()) return null;
+  if (caminho > VIRADA_IDAS*dm) return null;           // vai e volta demais: é tremor
+  return { i:ape, t:b[ape].t };
+}
+
+/* ===================== a máquina (§5.1) =====================
+   Regra única: o primeiro ponto que cruza V_ATIVA vira o ponto ativo e, enquanto
+   ele estiver puxando, TODOS os outros são ignorados — sem traço, sem rastro,
+   sem registro visual nenhum. Não é prioridade: é exclusividade.
+   Ao fixar, ASSENTA_MS de silêncio e os buffers zerados, para que a cauda do
+   gesto que acabou não se candidate a si mesma. */
+function fixa(agora, motivo, corte){
+  if (ativo){
+    let pts = ativo.pts;
+    if (corte != null){
+      const cortado = pts.filter(q => q.t <= corte);
+      if (cortado.length >= 4) pts = cortado;      // o corte comeu o episódio: fica inteiro
+    }
+    const comp = percurso(pts);
+    const amp  = amplitude(pts);
+    /* ETAPA 1: o veredito final é do arco desenhado (etapa 2). Aqui só o que a
+       captura sabe dizer: houve percurso e amostras suficientes. */
+    /* um episódio que já pôs arco na tela conta como capturado, mesmo que o corte
+       da virada o tenha encurtado abaixo de COMP_MIN depois. O arco fica (§6:
+       nada some da tela), e o diagnóstico tem de dizer a mesma coisa que a tela. */
+    const aceito = (comp >= COMP_MIN && pts.length >= 4) || !!vivo;
+    const util = aparaCauda(pts, V_PAUSA());
+    const fit = aceito ? medeAjuste(util) : null;   // medição, não desenho
+    episodios.push({ ponto:ativo.ponto, nome:nomeDe(ativo.ponto), t0:ativo.t0, t1:agora,
+                     n:pts.length, comp, amp, vPico:ativo.vPico, motivo, aceito,
+                     fit, pts, util });
+    incorpora(episodios[episodios.length-1]);   // vira arco agora, não no fim
+  }
+  const ponto = ativo ? ativo.ponto : -1;
+  ativo = null;
+  if (motivo === "virada" || motivo === "arco cheio"){
+    /* A virada não leva assentamento. O assentamento existe para a cauda de um
+       gesto que PAROU não se recandidatar a si mesma (§5.1) — e aqui a mão não
+       parou: ela já está dentro do gesto seguinte. 420ms de silêncio aqui comem
+       esse gesto inteiro, que é o problema que a virada veio resolver.
+       Em troca, o buffer é cortado no ápice pelo chamador: o próximo episódio
+       nasce da virada para a frente, sem herdar nada do que já foi fixado. */
+    fase = "procurando";
+    retomada = ponto;
+  } else {
+    fase = "assentando";
+    assentaAte = agora + ASSENTA_MS;
+    retomada = -1;
+  }
+}
+
+/* ===================== etapa 5.2 · a composição, enquanto acontece =====================
+   Um episódio que fecha vira arco AGORA, não no fim da captura. É o "cálculo
+   incremental" da §6, e é o que permite a pessoa ver a composição se formando.
+
+   Os arcos que já existem NUNCA são refeitos: reduzAArcos roda uma vez, sobre o
+   episódio recém-fechado, e o resultado é acrescentado. O que roda de novo são as
+   passadas GLOBAIS — coesão e juntas — porque elas dependem da composição inteira
+   e um arco novo muda onde os antigos deveriam estar. As duas são idempotentes de
+   nascença (baseOx/baseOy, baseStart/baseExtent), então repeti-las não acumula
+   erro; e como só mexem no ALVO, os arcos antigos não saltam: deslizam. */
+function refazPassadas(){
+  /* O ARCO VIVO NÃO ENTRA. Se ele entrasse, a composição inteira se reacomodaria
+     a cada quadro enquanto a pessoa ainda está gesticulando: os arcos já
+     assentados ficariam remexendo atrás do gesto em curso, e a coesão decidiria
+     sobre um arco que ainda está crescendo. Ele entra quando fecha — que é o que
+     "ao fechar, ele assenta" quer dizer. */
+  const fixos = composicao.filter(a => !a.vivo);
+  if (!fixos.length) return;
+  const esp = espessuraDe(composicao);
+  coesao = aproxima(fixos, esp);               // etapa 5 — fecha os vazios
+  applyCompositionJoints(fixos);               // §5.3 — sobre a composição inteira
+}
+
+/* ===================== etapa 5.3 · o arco vivo =====================
+   Um arco por episódio em curso, ajustado a cada quadro sobre o que a mão já
+   andou. Ele NASCE quando o percurso chega em COMP_MIN — o mesmo corte que decide
+   se um gesto vira traço, então nunca aparece um arco para um gesto que seria
+   recusado — e daí em diante só refina. Nunca é substituído: quando o episódio
+   fecha, este mesmo objeto vira o primeiro trecho da redução, e só os trechos
+   EXTRA nascem ao lado.
+
+   Sempre um arco só enquanto vivo. A partição em até 3 espera o fechamento, e é
+   de propósito: medido, num gesto que vira um S no meio, o k muda duas vezes
+   durante o gesto e o span pula 59,7° num quadro. Um arco que se parte na frente
+   da pessoa é a "substituição" da §6. Partir no assentamento é uma batida
+   natural — a mesma em que o arco para de seguir. */
+let vivo = null;
+/* AMOSTRAS CRUAS, não reamostradas. A distinção decidiu o comportamento: o
+   trecho entre um gesto e o seguinte é quase reto e a mão o percorre em 4 ou 5
+   quadros, então o percurso passa de COMP_MIN com pouquíssima MEDIDA. reamostra
+   devolve 44 pontos ali, mas todos interpolados sobre 5 vértices — não são 44
+   observações, são 5. Medido: com 5 amostras o centro do ajuste pulou de
+   (388,480) para (509,47) e voltou, 449px num quadro; com 10 ele fica em
+   (332,455) e não sai mais. 10 amostras a ~38fps são ~260ms de gesto. */
+const VIVO_AMOSTRAS = 10;
+
+function atualizaVivo(){
+  if (!ANIMA || !ativo) return;
+  if (ativo.pts.length < VIVO_AMOSTRAS) return;   // medida de menos para um círculo
+  if (percurso(ativo.pts) < COMP_MIN) return;     // ainda não é um gesto
+  const p = reamostra(ativo.pts);
+  /* e o ajuste precisa estar DETERMINADO. Num trecho quase reto, o círculo de
+     mínimos quadrados tem raio enorme e centro que salta de um lado para o outro
+     a cada amostra nova — arcoDeTrecho then força o span para o mínimo de 25° e
+     inventa um arco que o gesto não pediu. Medido: um arco nascido assim
+     deslizava 241px num quadro. Curvatura de verdade primeiro. */
+  const f = circulo(p);
+  if (!f || !isFinite(f.r) || f.r < 1) return;
+  if (Math.abs(spanDe(p, f)) < SPAN_MIN_ARCO) return;
+  if (f.medio/f.r > DEV_OK*3) return;              // o ajuste ainda não vale
+  const a = arcoDeTrecho(p);
+  if (!a) return;
+  a.trecho = p;
+  if (!vivo){
+    vivo = a;
+    vivo.vivo = true; vivo.cruz = [];              // não participa das juntas
+    vivo.des = geometriaDeNascimento(vivo);        // nasce no lugar e passa a seguir
+    composicao.push(vivo);
+  } else {
+    /* O TRAÇO VIVO NUNCA RECOLHE TINTA. spanDe soma o ângulo COM SINAL: quando a
+       mão começa a voltar, a soma diminui e o arco desfaz o que já tinha
+       desenhado — medido, um arco de 96°/386px encolhendo para 92°/370px, e
+       continuando a encolher enquanto a mão volta. É o "vai e volta e fica
+       pequena": o desenho andando para trás na frente da pessoa.
+       Aqui o span do arco vivo é monotônico. Se o ajuste novo pede menos
+       extensão, mantém-se a que já existe, recentrada sobre o mesmo ponto médio
+       para o arco não deslizar ao ser esticado. E se o SENTIDO inverte, o ajuste
+       novo é ignorado inteiro — a mão inverteu, e quem trata disso é a virada,
+       que fecha o episódio e começa outro. */
+    if (a.s !== vivo.s) return;
+    if (a.span < vivo.span){
+      const angM = a.a0 + a.s*a.span/2;            // o meio do arco novo
+      a.span = vivo.span;
+      a.a0 = angM - a.s*a.span/2;
+      a.baseExtent = a.span; a.baseStart = a.a0;
+    }
+    adotaGeometria(congela(vivo), a);              // o ALVO muda; a identidade não
+  }
+}
+
+/* Onde o traço ESTÁ agora, como objeto próprio. Quando a animação assenta, .des
+   volta a null e o desenho passa a ser o próprio alvo — se o alvo mudar depois
+   disso sem congelar antes, o arco salta para o ajuste novo em vez de persegui-lo.
+   Chamar isto antes de qualquer troca de alvo é o que garante a continuidade. */
+function congela(a){
+  if (!a.des) a.des = { ox:a.ox, oy:a.oy, r:a.r, a0:a.a0, s:a.s, span:a.span };
+  return a;
+}
+
+/* copia a geometria de um ajuste novo para um arco que já existe, sem tocar em
+   .des. É a diferença entre refinar e trocar. */
+function adotaGeometria(alvo, novo){
+  alvo.ox = novo.ox; alvo.oy = novo.oy; alvo.r = novo.r;
+  alvo.a0 = novo.a0; alvo.s = novo.s; alvo.span = novo.span;
+  alvo.baseOx = novo.baseOx; alvo.baseOy = novo.baseOy;
+  alvo.baseStart = novo.baseStart; alvo.baseExtent = novo.baseExtent;
+  alvo.rGesto = novo.rGesto; alvo.devGesto = novo.devGesto; alvo.nPts = novo.nPts;
+  alvo.spanBruto = novo.spanBruto; alvo.spanPreso = novo.spanPreso;
+  if (novo.trecho) alvo.trecho = novo.trecho;
+}
+
+/* O arco para de vez onde está: o alvo passa a ser a geometria DESENHADA, e a
+   base junto, para nenhuma passada posterior puxá-lo de volta. Depois disto ele
+   é exatamente o traço que a pessoa viu sair da mão. */
+function paraOndeEsta(a){
+  const g = desenhoDe(a);
+  a.ox = g.ox; a.oy = g.oy; a.r = g.r; a.a0 = g.a0; a.s = g.s; a.span = g.span;
+  a.baseOx = g.ox; a.baseOy = g.oy; a.baseStart = g.a0; a.baseExtent = g.span;
+  a.des = null;
+}
+
+function incorpora(e){
+  /* CONGELA: "fiz o gesto e ele desenhou e ficou no lugar". O arco que a pessoa
+     acompanhou saindo da mão é o arco final — sem reajuste e sem partição.
+     Reajustar ao fechar significa que o traço muda de forma no instante em que o
+     gesto acaba, e partir em 2 ou 3 significa que ele vira outra coisa. As duas
+     são fiéis ao movimento no papel e, na tela, são o desenho se mexendo sozinho
+     depois de pronto. ?congela=0 volta ao reajuste com partição, e o número que
+     mede o que isso custa é a FUGA na tabela da composição. */
+  const arcos = (e && e.aceito && !(vivo && CONGELA)) ? reduzAArcos(e.util || e.pts) : [];
+  if (vivo){
+    if (CONGELA){
+      paraOndeEsta(vivo);
+    } else if (arcos.length){
+      /* o arco que a pessoa viu crescer NÃO some, aconteça o que acontecer com o
+         episódio: se a redução devolveu trechos, ele vira o primeiro. */
+      adotaGeometria(congela(vivo), arcos[0]);
+    }
+    vivo.vivo = false; vivo.episodio = e;
+    for (const a of arcos.slice(1)){
+      a.episodio = e; a.des = geometriaDeNascimento(a); composicao.push(a);
+    }
+    vivo = null;
+  } else {
+    for (const a of arcos){ a.episodio = e; composicao.push(a); }
+  }
+  if (e) e.arcos = Math.max(arcos.length, vivo ? 0 : (e.aceito ? 1 : 0));
+  if (!composicao.length) return;
+  refazPassadas();
+  /* o enquadramento NÃO se mexe durante a captura. Reenquadrar a cada gesto
+     mudaria a escala do que já está na tela enquanto a pessoa ainda está se
+     movendo, e o gesto seguinte não cairia onde ela mira. Fica 1:1 até o fim. */
+  semeiaDesenho();
+}
+
+function observa(leituras, agora, escalaBruta){
+  relogio = agora;
+  saude.quadros++;
+  saude.t1 = agora;
+  if (leituras) saude.comPose++;
+
+  /* a escala do corpo tremula quadro a quadro; o limiar não pode tremular junto.
+     Média exponencial lenta: a distância da pessoa à câmera muda em segundos,
+     não em quadros. */
+  if (escalaBruta != null && isFinite(escalaBruta)){
+    const e = Math.min(OMBROS_MAX, Math.max(OMBROS_MIN, escalaBruta));
+    ombros = saude.escalaVista ? ombros + (e - ombros)*0.05 : e;
+    saude.escalaVista++;
+    saude.escalaMin = Math.min(saude.escalaMin ?? e, e);
+    saude.escalaMax = Math.max(saude.escalaMax ?? e, e);
+  }
+
+  /* o corte de visibilidade, contado ponto a ponto */
+  const aceitas = [];
+  (leituras || []).forEach(p => {
+    const pp = saude.porPonto[p.i]; if (!pp) return;
+    const vis = p.vis == null ? 1 : p.vis;
+    pp.visMax = Math.max(pp.visMax, vis);
+    if (vis < VIS_MIN){ pp.recusadoVis++; return; }
+    pp.visto++; aceitas.push(p);
+  });
+  if (aceitas.length) saude.comLeitura++; else saude.semLeitura++;
+
+  /* buffers. Isto não desenha nada: é o material da arbitragem — sem ele não há
+     como saber quem se moveu primeiro. */
+  const visto = new Set();
+  aceitas.forEach(p => {
+    if (!buf[p.i]) buf[p.i] = [];
+    const b = buf[p.i], pp = saude.porPonto[p.i];
+    const x = (1 - p.x)*W, y = p.y*H;                     // a cena é espelhada
+    visto.add(p.i);                                       // visto mesmo se a amostra cair
+
+    if (b.length){
+      const u = b[b.length-1], dt = (agora - u.t)/1000;
+      const v = dt > 0 ? Math.hypot(x-u.x, y-u.y)/dt : Infinity;
+      pp.vBruto = Math.max(pp.vBruto, v);                 // o pico ANTES do corte
+      /* a distribuição inteira, não só o pico: é nela que se vê onde o braço
+         acaba e o artefato começa. O espécime da Sens foi medido assim —
+         medianas e percentis, não valores isolados. */
+      if (isFinite(v) && pp.vs.length < 4000) pp.vs.push(v);
+      if (CORTA_SALTO && v > V_SALTO){
+        pp.salto++;
+        if (++pp.saltoSeq < SALTO_SEGUIDOS) return;       // erro do rastreador: descarta
+        b.length = 0;                                     // persistiu: realocação, recomeça
+      } else pp.saltoSeq = 0;
+    }
+    b.push({ x, y, t:agora });
+  });
+  for (let i=0; i<buf.length; i++){
+    if (!visto.has(i)) buf[i].length = 0;                 // sumiu do quadro: esquece
+    while (buf[i].length && agora - buf[i][0].t > MEM_MS) buf[i].shift();
+  }
+  vAgora = buf.map(b => velocidade(b, agora));
+  vAgora.forEach((v, i) => { const pp = saude.porPonto[i]; if (pp) pp.vPico = Math.max(pp.vPico, v); });
+  return aceitas.length;
+}
+
+function processaQuadro(leituras, agora, escalaBruta){
+  observa(leituras, agora, escalaBruta);
+
+  /* 2. assentando: ninguém é candidato */
+  if (fase === "assentando"){
+    if (agora < assentaAte) return;
+    limpaBuffers();
+    vAgora = buf.map(() => 0);
+    fase = "procurando";
+    return;
+  }
+
+  /* 3. procurando: o primeiro a cruzar o limiar vence; no mesmo quadro, o mais rápido */
+  if (fase === "procurando"){
+    let venc = -1, vVenc = 0;
+    for (let i=0; i<buf.length; i++){
+      if (vAgora[i] >= V_ATIVA() && vAgora[i] > vVenc){ venc = i; vVenc = vAgora[i]; }
+    }
+    if (venc < 0) return;
+    const b = buf[venc];
+    /* vindo de uma virada, o buffer desse ponto já começa no ápice: abrir dali
+       recupera os quadros que a janela de velocidade levou para reconhecer o
+       gesto novo. Nos outros casos, o recuo curto de sempre. */
+    const desde = (venc === retomada) ? 0 : Math.max(0, b.length-1-RETRO);
+    retomada = -1;
+    ativo = { ponto:venc, pts:b.slice(desde).map(p => ({...p})),
+              t0:agora, lentoDesde:0, vPico:vVenc };
+    fase = "ativo";
+    return;
+  }
+
+  /* 4. ativo: só este ponto existe */
+  const i = ativo.ponto, b = buf[i];
+  if (!b.length){ fixa(agora, "ponto perdido"); return; }
+  saude.quadrosAtivos++;
+  saude.maxSimultaneos = Math.max(saude.maxSimultaneos, 1);
+
+  const p = b[b.length-1], u = ativo.pts[ativo.pts.length-1];
+  if (!u || Math.hypot(p.x-u.x, p.y-u.y) > 0.5) ativo.pts.push({...p});
+  atualizaVivo();               // etapa 5.3 — o traço nasce durante o gesto
+
+  /* movimento dos outros: contado só para o diagnóstico, nunca desenhado */
+  let houveSilencio = false;
+  for (let k=0; k<buf.length; k++){
+    if (k === i) continue;
+    if (vAgora[k] >= V_ATIVA()){ silenciados[k] = (silenciados[k]||0) + 1; houveSilencio = true; }
+  }
+  if (houveSilencio) saude.quadrosSilenciando++;
+
+  const v = vAgora[i];
+  ativo.vPico = Math.max(ativo.vPico, v);
+
+  /* 4a · a virada fecha o episódio antes da parada.
+     Só depois de o episódio já valer um traço (COMP_MIN): sem essa guarda, uma
+     oscilação no começo partiria o gesto em fragmentos que morrem por percurso
+     curto — trocaria um episódio grande demais por nenhum. */
+  if (percurso(ativo.pts) >= COMP_MIN){
+    const ape = viradaEm(b);
+    if (ape){
+      fixa(agora, "virada", ape.t);
+      b.splice(0, ape.i);          // o buffer recomeça no ápice
+      return;
+    }
+  }
+
+  /* 4b · o arco encheu. Sem isto, um gesto de 285° é desenhado com 161° e os
+     124° restantes ficam sem traço nenhum em cima — medido numa captura real,
+     fuga de 43,7 espessuras com o span preso no teto. Fechando aqui, o gesto
+     vira dois arcos que se encontram, que é como a fonte é feita. */
+  /* o gatilho olha o span CRU do ajuste, não o do arco: o do arco já vem preso
+     entre 25° e 210° e chega no teto tarde demais — medido, um trecho de 218°
+     fechando com o arco desenhado em 129°. */
+  if (CORRENTE && vivo && (vivo.spanBruto || 0) >= MEDIAN_EXTENT){
+    fixa(agora, "arco cheio", agora);
+    b.splice(0, Math.max(0, b.length - 3));   // recomeça daqui, com um fio de recuo
+    return;
+  }
+
+  if (v < V_PAUSA()){
+    if (!ativo.lentoDesde) ativo.lentoDesde = agora;
+    else if (agora - ativo.lentoDesde >= PAUSA_MS) fixa(agora, "pausa");
+  } else ativo.lentoDesde = 0;
+}
+
+/* ===================== desenho =====================
+   ETAPA 1. Em modo normal não há nada a desenhar: o arco é da etapa 2 e o rastro
+   cru não pode aparecer (§1, §6 — "rastro de posições visível durante a captura"
+   produz dois registros simultâneos da mesma coisa). O dado cru existe só sob o
+   diagnóstico, e com selo dizendo que é dado cru. */
+let diagLigado = false;
+
+function pintaCru(){
+  const lm = cruAtual;
+  if (lm){
+    ctx.fillStyle = "#3A3A3A";
+    for (const q of lm){
+      ctx.beginPath(); ctx.arc((1-q.x)*W, q.y*H, 2.5, 0, 7); ctx.fill();
+    }
+  }
+  /* os pontos monitorados, com a velocidade de cada um */
+  buf.forEach((b, i) => {
+    if (!b.length) return;
+    const p = b[b.length-1];
+    const eAtivo = ativo && ativo.ponto === i;
+    ctx.strokeStyle = eAtivo ? "#FFFFFF" : (vAgora[i] >= V_ATIVA() ? "#FF5A5A" : "#6E93FF");
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(p.x, p.y, eAtivo ? 11 : 7, 0, 7); ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText(Math.round(vAgora[i]) + " px/s", p.x + 14, p.y + 4);
+  });
+  /* o rastro do episódio ativo — dado de entrada, exibido como pontos soltos
+     justamente para não parecer um desenho */
+  if (ativo && ativo.pts.length){
+    ctx.fillStyle = "#FFFFFF";
+    for (const q of ativo.pts){ ctx.beginPath(); ctx.arc(q.x, q.y, 1.6, 0, 7); ctx.fill(); }
+  }
+  /* cada episódio fixado na SUA cor, e o arco que saiu dele com um fio da mesma
+     cor por dentro do traço branco. É o pareamento: um arco perdido é um arco
+     cuja cor não está em cima dos próprios pontos. */
+  for (const e of episodios){
+    if (!e.aceito || !e.pts) continue;
+    ctx.fillStyle = corDoEpisodio(e);
+    for (const q of e.pts){ ctx.beginPath(); ctx.arc(q.x, q.y, 1.4, 0, 7); ctx.fill(); }
+  }
+  const q = molduraDes || moldura;
+  ctx.save();
+  ctx.setTransform(q.k, 0, 0, q.k, q.dx, q.dy);
+  ctx.lineWidth = Math.max(0.8, 1.6/q.k);
+  for (const a of composicao){
+    ctx.strokeStyle = a.vivo ? "#FFFFFF" : corDoEpisodio(a.episodio);
+    tracaArco(a);
+  }
+  /* e um fio ligando o meio do arco ao meio do trecho de gesto, quando os dois
+     não estão no mesmo lugar — é a distância que o número "fuga" mede */
+  ctx.setLineDash([3/q.k, 3/q.k]);
+  for (const a of composicao){
+    if (!a.trecho || !a.trecho.length) continue;
+    const g = desenhoDe(a), ang = g.a0 + g.s*g.span/2;
+    const M = { x:g.ox + Math.cos(ang)*g.r, y:g.oy + Math.sin(ang)*g.r };
+    const G = a.trecho[Math.floor(a.trecho.length/2)];
+    if (Math.hypot(M.x-G.x, M.y-G.y) < espessuraDe(composicao)) continue;
+    ctx.strokeStyle = a.vivo ? "#FFFFFF" : corDoEpisodio(a.episodio);
+    ctx.beginPath(); ctx.moveTo(M.x, M.y); ctx.lineTo(G.x, G.y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+function pontosDoArco(a, N = 64){
+  const out = [];
+  for (let i=0; i<=N; i++){
+    const ang = a.a0 + a.s*a.span*i/N;
+    out.push({ x: a.ox + Math.cos(ang)*a.r, y: a.oy + Math.sin(ang)*a.r });
+  }
+  return out;
+}
+/* espessura: §5.5 diz raio/30 (1:18 da fonte fica gordo nesta escala). A fonte é
+   MONOLINEAR — uma espessura só no alfabeto inteiro — então a composição usa um
+   número só, do raio médio, e não uma espessura por arco. */
+function espessuraDe(arcos){
+  if (!arcos.length) return VIEW_MIN*0.25*WIDTH_RATIO;
+  const m = arcos.reduce((a,x) => a + x.r, 0)/arcos.length;
+  return m*WIDTH_RATIO;
+}
+function enquadra(arcos, esp){
+  if (!arcos.length) return {k:1, dx:0, dy:0};
+  let x0=1e9, y0=1e9, x1=-1e9, y1=-1e9;
+  for (const a of arcos) for (const q of pontosDoArco(a)){
+    x0=Math.min(x0,q.x); x1=Math.max(x1,q.x); y0=Math.min(y0,q.y); y1=Math.max(y1,q.y);
+  }
+  const m = esp/2;                       // o terminal redondo não pode ser cortado
+  x0-=m; y0-=m; x1+=m; y1+=m;
+  const cw = x1-x0 || 1, ch = y1-y0 || 1, MARGEM = 0.11;
+  const k = Math.min(2.5, (W*(1-2*MARGEM))/cw, (H*(1-2*MARGEM))/ch);
+  return { k, dx: W/2 - (x0+x1)/2*k, dy: H/2 - (y0+y1)/2*k };
+}
+/* a geometria que APARECE. Sem a camada de inércia semeada, é a própria alvo —
+   e é por isso que ?anima=0 devolve exatamente o desenho de antes. */
+const desenhoDe = a => a.des || a;
+function tracaArco2(c, a){
+  const g = desenhoDe(a);
+  c.beginPath();
+  c.arc(g.ox, g.oy, g.r, g.a0, g.a0 + g.s*g.span, g.s < 0);
+  c.stroke();
+}
+function tracaArco(a){ tracaArco2(ctx, a); }
+/* ===================== a fuga =====================
+   A pergunta que nenhuma medida deste arquivo respondia: o traço que está na
+   tela passa por onde a mão passou?
+
+   Todas as outras medidas são do AJUSTE — o desvio do círculo de mínimos
+   quadrados, que diz se o gesto cabe num arco. Mas entre o ajuste e o desenho a
+   §5.5 mexe em duas coisas de propósito: o raio medido vira raio de fonte
+   (0,20–0,32 de viewMin, 144–230px aqui) e o span é preso entre 25° e 210°. Um
+   gesto de raio 600px vira um arco de 230px ancorado no ponto médio — cabe
+   perfeitamente num círculo, desvio de 2%, e mesmo assim sai de cima do
+   movimento. É esse traço que parece perdido, e ele estava invisível para o
+   diagnóstico porque todo número existente dizia que estava tudo bem.
+
+   Fuga = a distância de cada ponto do trecho de gesto até o arco desenhado. Em
+   espessuras, porque é assim que o olho lê: meia espessura é o traço em cima do
+   movimento; dez espessuras é um arco solto perto de um gesto. */
+function fugaDoArco(a){
+  const t = a.trecho;
+  if (!t || t.length < 2) return null;
+  const g = desenhoDe(a), pts = pontosDoArco(g, 64);
+  const ds = t.map(q => {
+    let d = Infinity;
+    for (const u of pts) d = Math.min(d, (q.x-u.x)*(q.x-u.x) + (q.y-u.y)*(q.y-u.y));
+    return Math.sqrt(d);
+  }).sort((x,y) => x-y);
+  return { mediana: ds[Math.floor(ds.length/2)], pior: ds[ds.length-1] };
+}
+
+/* cores por episódio, para o diagnóstico poder emparelhar arco e gesto no olho.
+   Um arco perdido é um arco cuja cor não está em cima dos próprios pontos. */
+const CORES_EP = ["#5C7BFF", "#FF5A5A", "#4ADE80", "#FBBF24", "#E879F9", "#22D3EE"];
+const corDoEpisodio = e => {
+  const i = e ? episodios.indexOf(e) : -1;
+  return i < 0 ? "#8A8A8A" : CORES_EP[i % CORES_EP.length];
+};
+
+/* ===================== a perseguição =====================
+   Semear é dar à geometria desenhada um ponto de partida; animar é levá-la até a
+   alvo. Um arco que JÁ está desenhado nunca é resemeado — ele desliza de onde
+   está para onde passou a ser. É o "nascem, se refinam, nunca são trocados" da
+   §6, escrito como código.
+
+   O ponto de partida de um arco recém-nascido é a geometria do próprio ajuste,
+   antes da coesão e antes das juntas: o arco aparece onde o gesto o pôs e só
+   então se junta aos outros. Nada é inventado para a animação — os dois extremos
+   já existiam, guardados em baseOx/baseOy e baseStart/baseExtent. */
+const geometriaDeNascimento = a => ({
+  ox:a.baseOx, oy:a.baseOy, r:a.r, a0:a.baseStart, s:a.s, span:a.baseExtent });
+
+function semeiaDesenho(){
+  if (!ANIMA || !composicao.length) return;
+  for (const a of composicao) if (!a.des) a.des = geometriaDeNascimento(a);
+  /* O ENQUADRAMENTO DESENHADO PARTE DO ATUAL, não de um enquadramento calculado.
+     Este era o erro que fazia o traço "flutuar e não seguir a mão": semear com
+     enquadra() dos arcos significava que, no instante em que o primeiro arco
+     nascia, a cena dava um zoom para enquadrá-lo — 2,17× medido, com a origem
+     deslocada em (−518, −628). A mão, que está em coordenadas de tela, ia parar
+     231px ACIMA do topo do canvas. O traço estava colado na mão o tempo todo, em
+     coordenadas de composição; quem tinha ido embora era a câmera.
+     Partindo do enquadramento em vigor, nada se mexe enquanto ele não mudar — e
+     ele só muda no fim da captura, que é quando o zoom deve acontecer. */
+  if (!molduraDes) molduraDes = { ...moldura };
+}
+
+const encurta = d => { while (d >  Math.PI) d -= 2*Math.PI;
+                       while (d < -Math.PI) d += 2*Math.PI; return d; };
+
+/* o erro que falta percorrer, em PIXELS — inclusive o dos ângulos, convertido
+   pelo raio. Um span 2° fora num arco de 200px são 7px de ponta fora do lugar, e
+   é a ponta que a pessoa vê. */
+function erroDoDesenho(){
+  let e = 0;
+  for (const a of composicao){
+    const g = a.des; if (!g) continue;
+    e = Math.max(e, Math.hypot(g.ox-a.ox, g.oy-a.oy),
+                    Math.abs(encurta(a.a0-g.a0))*a.r,
+                    Math.abs(a.span-g.span)*a.r);
+  }
+  if (molduraDes)
+    e = Math.max(e, Math.abs(molduraDes.k-moldura.k)*VIEW_MIN,
+                    Math.abs(molduraDes.dx-moldura.dx),
+                    Math.abs(molduraDes.dy-moldura.dy));
+  return e;
+}
+
+function assenta(){
+  for (const a of composicao) a.des = null;
+  molduraDes = null;                     // volta a ler a alvo: repouso idêntico
+}
+
+/* UM passo da perseguição. Fica fora do laço de propósito: é assim que ela pode
+   ser medida sem depender do relógio do navegador — com a janela em segundo
+   plano o requestAnimationFrame cai para ~1 quadro por segundo e a animação
+   parece travada quando na verdade está correndo devagar. Devolve true quando
+   chegou. */
+function passoDeInercia(dt = 16.7){
+  const k = 1 - Math.exp(-Math.max(1, Math.min(100, dt))/INERCIA_TAU);
+  const teto = espessuraDe(composicao)*INERCIA_TETO*dt/1000;
+  for (const a of composicao){
+    const g = a.des; if (!g) continue;
+    let dx = (a.ox - g.ox)*k, dy = (a.oy - g.oy)*k;
+    let dr = (a.r - g.r)*k, dsp = (a.span - g.span)*k;
+    let da = encurta(a.a0 - g.a0)*k;
+
+    /* O ARCO VIVO NÃO ATRASA A EXTENSÃO. Enquanto o gesto acontece, o span é
+       "até onde a mão já foi" — atrasá-lo deixa o traço curto e a mão longe da
+       ponta, que foi exatamente a queixa: ele flutua, não segue a mão. O que
+       atrasa é o CÍRCULO (centro e raio), que é a forma se acomodando enquanto
+       o ajuste ainda muda de ideia. A ponta acompanha; o corpo amacia.
+       Quando o episódio fecha o arco deixa de ser vivo e volta a atrasar tudo,
+       porque aí o que se move é a composição se reacomodando — e essa sim
+       precisa deslizar. */
+    if (a.vivo){ dsp = a.span - g.span; da = encurta(a.a0 - g.a0); }
+    /* O teto mede o PONTO MÉDIO do arco, e essa escolha é o que separa crescer de
+       deslizar. arcoDeTrecho ancora o arco no meio do trecho de gesto: quando o
+       gesto se estende, as duas pontas abrem em volta do meio e o ponto médio
+       fica praticamente parado. Quando o arco desliza, ele vai junto.
+       Frear a geometria toda foi a primeira versão, e foi medida: a ponta
+       desenhada ficava 210px atrás do ajuste (máx 448), porque esticar 300px de
+       arco a 5,9px por quadro leva 50 quadros e o gesto inteiro dura 20 — o
+       traço não alcançava a mão nunca. Soltar span e início foi a segunda, e
+       também foi medida: 241px num quadro só, com um arco recém-nascido
+       deslizando ao longo do próprio círculo. O ponto médio é o que responde
+       "o que já estava na tela se mexeu?", que é a pergunta de verdade. */
+    const meio = q => { const ang = q.a0 + q.s*q.span/2;
+                        return { x:q.ox + Math.cos(ang)*q.r, y:q.oy + Math.sin(ang)*q.r }; };
+    if (!a.vivo){
+      const antes = meio(g);
+      const depois = meio({ ox:g.ox+dx, oy:g.oy+dy, r:g.r+dr,
+                            a0:g.a0+da, s:a.s, span:g.span+dsp });
+      const m = Math.hypot(depois.x-antes.x, depois.y-antes.y);
+      if (m > teto){                     // encolhe TUDO na mesma proporção: o arco
+        const f = teto/m;                // desacelera sem se deformar no caminho
+        dx*=f; dy*=f; dr*=f; dsp*=f; da*=f;
+      }
+    } else {
+      /* no arco vivo o teto vale só para o círculo: as pontas são o gesto */
+      const m = Math.max(Math.hypot(dx, dy), Math.abs(dr));
+      if (m > teto){ const f = teto/m; dx*=f; dy*=f; dr*=f; }
+    }
+    g.ox += dx; g.oy += dy; g.r += dr; g.span += dsp; g.a0 += da;
+    g.s = a.s;
+  }
+  if (molduraDes){
+    let dk = (moldura.k - molduraDes.k)*k;
+    let ddx = (moldura.dx - molduraDes.dx)*k, ddy = (moldura.dy - molduraDes.dy)*k;
+    const m = Math.max(Math.abs(dk)*VIEW_MIN, Math.hypot(ddx, ddy));
+    if (m > teto){ const f = teto/m; dk*=f; ddx*=f; ddy*=f; }
+    molduraDes.k += dk; molduraDes.dx += ddx; molduraDes.dy += ddy;
+  }
+  if (erroDoDesenho() >= INERCIA_PARA) return false;
+  assenta();                             // o repouso volta a ler a geometria alvo
+  return true;
+}
+
+let animando = 0, ultimoQuadro = 0;
+function animaComposicao(){
+  if (!ANIMA || !composicao.length){ pinta(); return; }
+  semeiaDesenho();
+  if (estado === "grava") return;        // durante a captura quem anda é laco()
+  if (animando) return;                  // já há um laço correndo; ele segue o alvo novo
+  let ant = 0;
+  animando = requestAnimationFrame(function passo(t){
+    const dt = ant ? t - ant : 16.7; ant = t;
+    const chegou = passoDeInercia(dt);
+    pinta();
+    animando = chegou ? 0 : requestAnimationFrame(passo);
+  });
+}
+
+/* UMA tinta, UMA espessura, alfa cheio. Nenhum arco é "passado": o resultado tem
+   de ler como uma imagem só. Terminal semicircular = lineCap round (§4). */
+function pintaComposicao(alfa = 1){
+  if (!composicao.length) return;
+  /* a espessura sai do raio, e a coesão e as juntas nunca mexem em raio: ela é a
+     mesma na geometria alvo e na desenhada. O ENQUADRAMENTO não — ele persegue,
+     porque a caixa da composição muda enquanto os arcos deslizam. */
+  const esp = espessuraDe(composicao), q = molduraDes || moldura;
+
+  if (!GOO_LIGADO){
+    ctx.setTransform(q.k, 0, 0, q.k, q.dx, q.dy);
+    ctx.strokeStyle = "#FFFFFF"; ctx.lineWidth = esp/q.k;
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.globalAlpha = alfa;
+    for (const a of composicao) tracaArco(a);
+    ctx.setTransform(1,0,0,1,0,0);
+    return;
+  }
+
+  /* o sigma do blur segue a espessura NA TELA, depois do enquadramento: o filtro
+     opera em pixels do canvas, não em unidades da composição */
+  const espTela = esp;
+  document.querySelector("#plc-goo feGaussianBlur")
+          .setAttribute("stdDeviation", String(espTela*GOO_BLUR_RATIO));
+
+  octx.setTransform(1,0,0,1,0,0);
+  octx.clearRect(0, 0, W, H);
+  octx.setTransform(q.k, 0, 0, q.k, q.dx, q.dy);
+  octx.strokeStyle = "#FFFFFF";
+  octx.lineWidth = espTela/q.k;
+  octx.lineCap = "round"; octx.lineJoin = "round";
+  /* DENTRO DO OFFSCREEN, ALFA 1 EM TUDO. Qualquer fade ou revelação progressiva
+     com alfa parcial é apagado inteiro pelo limiar do gooey — o degrau de alfa não
+     distingue "meio transparente de propósito" de "borda espalhada pelo blur".
+     O fade entra depois do filtro, no desenho do offscreen para a tela. */
+  octx.globalAlpha = 1;
+  for (const a of composicao) tracaArco2(octx, a);
+  /* o filete, só onde há junta de verdade: o ponto de cruzamento que a §5.3
+     calculou e validou dentro do span dos dois arcos. Entra ANTES do filtro,
+     para o limiar fundir disco e traços num contorno só — desenhado depois, seria
+     um círculo colado por cima. */
+  if (GOO_FILETE > 0){
+    const R = (esp/q.k)*GOO_FILETE;
+    octx.fillStyle = "#FFFFFF";
+    /* recalculado sobre a geometria DESENHADA, não sobre a que a §5.3 guardou:
+       enquanto os arcos deslizam, a junta está onde os traços se cruzam agora. */
+    for (const X of cruzamentosDe(composicao.map(desenhoDe))){
+      octx.beginPath(); octx.arc(X.x, X.y, R, 0, 7); octx.fill();
+    }
+  }
+  octx.setTransform(1,0,0,1,0,0);
+
+  /* a fusão acontece com alfa 1, num buffer próprio */
+  o2ctx.setTransform(1,0,0,1,0,0);
+  o2ctx.clearRect(0, 0, W, H);
+  o2ctx.save();
+  o2ctx.filter = "url(#plc-goo)";
+  o2ctx.globalAlpha = 1;
+  o2ctx.drawImage(off, 0, 0);
+  o2ctx.restore();
+
+  /* e só então o fade, sobre o resultado já fundido, sem filtro no caminho */
+  ctx.save();
+  ctx.filter = "none";
+  ctx.globalAlpha = alfa;
+  ctx.drawImage(off2, 0, 0);
+  ctx.restore();
+}
+
+function pinta(){
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.fillStyle = "#0A0A0A"; ctx.fillRect(0, 0, W, H);
+  /* a composição aparece DURANTE a captura: os arcos nascem quando cada gesto
+     fecha. O rastro cru continua fora (§1, §6) — só o arco. */
+  if (estado === "grava" || estado === "resultado" || modoDedo) pintaComposicao();
+  if (diagLigado && (estado === "calibra" || estado === "grava" || estado === "resultado")) pintaCru();
+  $("selo").hidden = !(diagLigado && estado !== "repouso");
+  const hud = $("fase-hud");
+  hud.hidden = !(diagLigado && (estado === "grava" || estado === "calibra"));
+  if (!hud.hidden) hud.textContent = estado === "calibra" ? "calibragem"
+                 : fase + (ativo ? " · " + nomeDe(ativo.ponto) : "");
+}
+
+/* ===================== diagnóstico ===================== */
+const num = (v, c=0) => (v==null || !isFinite(v)) ? "—" : v.toFixed(c);
+function pct(vs, q){
+  if (!vs || !vs.length) return null;
+  const a = [...vs].sort((x,y) => x-y);
+  return a[Math.min(a.length-1, Math.floor(q*a.length))];
+}
+
+function pintaDiag(){
+  const d = $("diag");
+  if (d.hidden) return;
+  const dur = (saude.t1 - saude.t0)/1000;
+  const aceitos = episodios.filter(e => e.aceito).length;
+
+  const captura = modoDedo
+    ? `<p>Modo dedo — sem câmera. A mesma máquina de estados, alimentada pelo ponteiro.</p>`
+    : `<table>
+        <tr><th>quadros do laço</th><td>${saude.quadros}</td>
+            <th>com pose</th><td class="${saude.comPose?'passa':'morre'}">${saude.comPose}</td>
+            <th>com ponto útil</th><td class="${saude.comLeitura?'passa':'morre'}">${saude.comLeitura}</td></tr>
+        <tr><th>erros no laço</th><td class="${saude.erros?'morre':''}">${saude.erros}</td>
+            <th>duração</th><td>${num(dur,1)}s</td>
+            <th>amostragem</th><td>${num(dur>0 ? saude.comLeitura/dur : 0,1)} Hz</td></tr>
+        <tr><th>leitura</th><td style="text-align:left">${fonte.rotulo}</td>
+            <th>delegate</th><td>${delegateUsado}</td>
+            <th>modelo</th><td style="text-align:left">${fonte.modelo}</td></tr>
+       </table>
+       ${saude.erros ? `<p class="morre">último erro: <code>${saude.ultimoErro}</code></p>` : ""}
+       <p>“com pose” = o modelo achou um corpo. “com ponto útil” = pelo menos um ponto monitorado
+          passou no corte de visibilidade ${VIS_MIN}. A diferença entre os dois é o gesto que existiu
+          e não foi medido.</p>`;
+
+  const restaAssenta = fase === "assentando" ? Math.max(0, assentaAte - relogio) : 0;
+  const maquina = `
+    <table>
+      <tr><th>fase</th><td class="vivo" style="text-align:left">${fase}${restaAssenta ? " · "+num(restaAssenta)+"ms" : ""}</td>
+          <th>ponto ativo</th><td style="text-align:left">${ativo ? nomeDe(ativo.ponto) : "—"}</td>
+          <th>amostras</th><td>${ativo ? ativo.pts.length : 0}</td>
+          <th>percurso</th><td>${ativo ? num(percurso(ativo.pts)) : 0} px</td></tr>
+    </table>
+    <table style="margin-top:6px">
+      <tr><th>ponto</th><th>velocidade</th><th></th><th>estado</th>
+          <th>pico</th><th>bruto</th><th>p10</th><th>p25</th><th>p50</th><th>p90</th><th>p99</th><th>saltos</th>
+          <th>venceu</th><th>silenciado</th><th>visto</th><th>recusado</th><th>visib.máx</th></tr>
+      ${MONITORADOS().map((f, i) => {
+        const v = vAgora[i] || 0;
+        const pp = saude.porPonto[i] || {visto:0, recusadoVis:0, vPico:0, visMax:0};
+        const eAtivo = ativo && ativo.ponto === i;
+        const cls = eAtivo ? "vivo" : (v >= V_ATIVA() ? "morre" : "");
+        const est = eAtivo ? "ATIVO"
+                  : fase === "assentando" ? "assentando"
+                  : v >= V_ATIVA() ? (fase === "ativo" ? "silenciado" : "candidato")
+                  : (buf[i] && buf[i].length ? "visto" : "ausente");
+        const larg = Math.min(60, v/(V_ATIVA()*2)*60);
+        return `<tr><td>${f.nome}</td>
+          <td class="${cls}">${num(v)} px/s</td>
+          <td style="text-align:left;width:64px"><span class="plc-barrinha" style="width:${larg}px;background:${v>=V_ATIVA()?'#FF5A5A':'#002FA7'}"></span></td>
+          <td class="${cls}" style="text-align:left">${est}</td>
+          <td class="${pp.vPico>=V_ATIVA()?'passa':'morre'}">${num(pp.vPico)}</td>
+          <td class="${pp.vBruto>V_SALTO?'morre':''}">${num(pp.vBruto)}</td>
+          <td>${num(pct(pp.vs,0.10))}</td>
+          <td class="${pct(pp.vs,0.25)>V_ATIVA()?'morre':''}">${num(pct(pp.vs,0.25))}</td>
+          <td>${num(pct(pp.vs,0.50))}</td>
+          <td>${num(pct(pp.vs,0.90))}</td>
+          <td class="${pct(pp.vs,0.99)>V_SALTO?'morre':''}">${num(pct(pp.vs,0.99))}</td>
+          <td class="${pp.salto?'morre':''}">${pp.salto}</td>
+          <td>${episodios.filter(e => e.ponto === i).length}</td>
+          <td>${silenciados[i]||0}</td>
+          <td class="${pp.visto?'':'morre'}">${pp.visto}</td>
+          <td class="${pp.recusadoVis?'morre':''}">${pp.recusadoVis}</td>
+          <td>${pp.visMax.toFixed(2)}</td></tr>`;
+      }).join("")}
+    </table>
+    <p>abre em ${num(V_ATIVA())} px/s · fixa após ${PAUSA_MS}ms abaixo de ${num(V_PAUSA())} px/s ·
+       ${ASSENTA_MS}ms de assentamento antes do próximo candidato · velocidade medida
+       sobre ${JANELA_MS}ms.</p>`;
+
+  const linhasEp = episodios.map((e, i) => `
+    <tr style="${e.aceito?'font-weight:600':''}">
+      <td>${e.aceito?"▪":"·"} ${i+1}</td>
+      <td>${e.nome}</td>
+      <td>${num((e.t0-saude.t0)/1000,2)}s</td>
+      <td>${num((e.t1-e.t0))}ms</td>
+      <td>${e.n}</td>
+      <td>${num(e.comp)}</td>
+      <td>${num(e.amp)}</td>
+      <td>${e.fit ? num(e.fit.r) : "—"}</td>
+      <td>${e.fit ? num(e.fit.span*180/Math.PI)+"°" : "—"}</td>
+      <td>${e.fit ? num(e.fit.arco) : "—"}</td>
+      <td>${e.fit && e.fit.volta ? e.fit.volta.toFixed(1)+"×" : "—"}</td>
+      <td class="${e.fit ? (e.fit.rel<0.10?'passa':'morre') : ''}">${e.fit ? (e.fit.rel*100).toFixed(1)+"%" : "—"}</td>
+      <td class="${e.fit&&e.fit.rel2!=null ? (e.fit.rel2<0.10?'passa':'morre') : ''}">${e.fit&&e.fit.rel2!=null ? (e.fit.rel2*100).toFixed(1)+"%" : "—"}</td>
+      <td class="${e.fit&&e.fit.rel3!=null ? (e.fit.rel3<0.10?'passa':'morre') : ''}">${e.fit&&e.fit.rel3!=null ? (e.fit.rel3*100).toFixed(1)+"%" : "—"}</td>
+      <td>${e.motivo}</td>
+      <td class="${e.aceito?'passa':'morre'}">${e.aceito ? "capturado" : (e.comp < COMP_MIN ? "percurso curto" : "poucas amostras")}</td>
+    </tr>`).join("") || `<tr><td colspan="10" class="morre">nenhum episódio</td></tr>`;
+
+  const vPicoGeral = saude.porPonto.length ? Math.max(...saude.porPonto.map(p => p.vPico)) : 0;
+  const algumVisto = saude.porPonto.some(p => p.visto > 0);
+  const recusas = saude.porPonto.reduce((a,p) => a + p.recusadoVis, 0);
+  /* um ponto visto não absolve os outros: se a cabeça aparece e os dois pulsos
+     são recusados, o pico de velocidade é zero porque o que se moveu não estava
+     sendo medido — e dizer "movimento lento demais" seria mentira. */
+  const cegos = saude.porPonto
+    .map((p, i) => ({ nome: MONITORADOS()[i] ? MONITORADOS()[i].nome : "?",
+                      frac: saude.comPose ? p.recusadoVis/saude.comPose : 0 }))
+    .filter(p => p.frac > 0.5);
+  const avisoCego = cegos.length
+    ? ` Atenção: ${cegos.map(c => c.nome+" ("+Math.round(c.frac*100)+"% dos quadros)").join(", ")} ${cegos.length>1?"ficaram":"ficou"} abaixo do corte de visibilidade — o pico pode estar baixo porque o ponto que se moveu não foi medido.`
+    : "";
+
+  /* uma porta de cada vez, na ordem em que o quadro atravessa o sistema, e cada
+     uma com o número que a fechou. §6: o que travou uma sessão inteira foi ter
+     quatro filtros em cadeia e nenhum deles dizendo qual zerou o resultado. */
+  const veredito =
+      !saude.quadros
+        ? ["", "Nenhum quadro processado ainda."]
+    : (!modoDedo && !saude.comPose)
+        ? ["morre", `Porta 1 — a leitura de corpo. ${saude.quadros} quadro(s) do laço, nenhum com pose. O modelo rodou mas não achou ninguém: enquadramento, luz, ou o corpo perto demais da câmera. O gesto nem chegou a ser avaliado.`]
+    : !algumVisto
+        ? ["morre", `Porta 2 — a visibilidade. A pose foi lida em ${saude.comPose} quadro(s), mas nenhum ponto monitorado passou no corte de ${VIS_MIN} (${recusas} recusa(s)). Veja "visibilidade máx." na tabela abaixo: o ponto está fora do quadro ou encoberto.`]
+    : (ativo && !episodios.length)
+        ? ["vivo", `Traço vivo em ${nomeDe(ativo.ponto)} — ${ativo.pts.length} amostras, ${num(percurso(ativo.pts))}px de percurso.`]
+    : !episodios.length
+        ? ["morre", `Porta 3 — o limiar de velocidade. O pico da captura foi ${num(vPicoGeral)} px/s e o limiar é ${num(V_ATIVA())} px/s. ${vPicoGeral < V_ATIVA()*0.5
+            ? "Muito abaixo: ou o movimento foi lento, ou o corpo ocupa pouco do quadro e o mesmo gesto rende menos pixels."
+            : "Perto do limiar — faltou pouco."}${avisoCego}`]
+    : !aceitos
+        ? ["morre", `Porta 4 — o percurso mínimo. ${episodios.length} episódio(s) abriram, todos abaixo de ${COMP_MIN}px. O maior teve ${num(Math.max(...episodios.map(e=>e.comp)))}px.`]
+        : ["passa", `${aceitos} episódio(s) capturado(s), de ${episodios.length} aberto(s). Na etapa 2 cada um vira até ${MAX_ARCOS} arcos.${avisoCego}`];
+
+  const resumo = `pose ${saude.comPose}/${saude.quadros} · util ${saude.comLeitura} · ` +
+    /* sem isto não dá para ler a captura de fora: os limiares são derivados do
+       corpo, então dois resumos com os mesmos px/s podem estar em regimes
+       completamente diferentes. */
+    `ombros ${num(ombros)} (abre ${num(V_ATIVA())} pausa ${num(V_PAUSA())} vira ${num(VIRADA_MIN())}px/${VIRADA_MS}ms exc ${num(VIRADA_EXC())}px) · ` +
+    MONITORADOS().map((f,i) => { const pp = saude.porPonto[i]||{};
+      return `${f.nome}: pico ${num(pp.vPico)}/${num(pp.vBruto)} ` +
+             `p10 ${num(pct(pp.vs,0.10))} p25 ${num(pct(pp.vs,0.25))} p50 ${num(pct(pp.vs,0.5))} ` +
+             `p90 ${num(pct(pp.vs,0.9))} p99 ${num(pct(pp.vs,0.99))} ` +
+             `saltos ${pp.salto||0} vis ${(pp.visMax||0).toFixed(2)} visto ${pp.visto||0}`;
+    }).join(" · ") +
+    ` · episodios ${episodios.length} (${aceitos} aceitos)` +
+    (episodios.length ? ": " + episodios.map(e =>
+        `${e.nome} ${Math.round(e.comp)}px ${e.motivo}` +
+        (e.fit ? ` [r${Math.round(e.fit.r)} sp${Math.round(e.fit.span*180/Math.PI)}` +
+                 ` volta${e.fit.volta?e.fit.volta.toFixed(1):"?"}` +
+                 ` dev ${(e.fit.rel*100).toFixed(1)}/${e.fit.rel2!=null?(e.fit.rel2*100).toFixed(1):"?"}` +
+                 `/${e.fit.rel3!=null?(e.fit.rel3*100).toFixed(1):"?"}%]` : "") +
+        (e.aceito?"":" REC")).join(", ") : "") +
+    ` · arcos ${composicao.length}` +
+    (composicao.length ? (() => {
+      const esp = espessuraDe(composicao);
+      const fs = composicao.map(a => ({ a, f: fugaDoArco(a) })).filter(x => x.f);
+      if (!fs.length) return "";
+      fs.sort((x,y) => y.f.pior - x.f.pior);
+      const perdidos = fs.filter(x => x.f.pior > esp*5).length;
+      return ` · fuga ` + fs.map(x =>
+        (x.f.pior/esp).toFixed(1) +
+        (x.a.spanPreso ? "!" + x.a.spanPreso[0] : "") +
+        (x.a.rGesto && (x.a.r/x.a.rGesto < 0.5 || x.a.r/x.a.rGesto > 2) ? "!r" + (x.a.r/x.a.rGesto).toFixed(1) : "")
+      ).join(" ") + ` esp (${perdidos} perdido(s) >5)`;
+    })() : "") +
+    (coesao ? ` · coesao ${coesao.passos.length} conexao(oes) forcada(s), ${coesao.grupos} grupo(s)` +
+              (coesao.passos.length ? " [" + coesao.passos.map(x => `${Math.round(x.folga)}→${Math.round(x.anda)}px`).join(" ") + "]" : "")
+            : (COESAO_LIGADA ? "" : " · COESAO OFF")) +
+    (CORTA_SALTO ? "" : " · SALTO OFF");
+
+  d.innerHTML = `
+    <section><h4>Veredito</h4><p class="${veredito[0]}">${veredito[1]}</p>
+      <p style="margin-top:8px">resumo para copiar: <code id="diag-resumo">${resumo}</code></p></section>
+    <section><h4>Máquina de exclusividade — ao vivo</h4>${maquina}</section>
+    <section><h4>Captura</h4>${captura}</section>
+    <section><h4>Episódios — um de cada vez, na ordem em que aconteceram</h4>
+      <table>
+        <tr><th>#</th><th>ponto</th><th>início</th><th>duração</th><th>amostras</th>
+            <th>percurso</th><th>amplitude</th><th>raio</th><th>span</th><th>arco</th>
+            <th>voltas</th><th>dev 1 arco</th><th>2 arcos</th><th>3 arcos</th>
+            <th>fim</th><th>veredito</th></tr>
+        ${linhasEp}
+      </table>
+      <p>“percurso” é quanto a mão andou; “amplitude” é a maior distância entre dois pontos do
+         episódio. Percurso alto com amplitude baixa é agitação, não gesto — a diferença entre os
+         dois é exatamente o que a redução a arco vai jogar fora na etapa 2.
+         “desvio” é quanto o caminho da mão se afasta, em média, do círculo que melhor o
+         descreve — é literalmente o tremor que não vai aparecer no desenho. “desvio/raio”
+         é o que decide: abaixo de 10% o gesto cabe num arco e a §3 se sustenta; da ordem
+         do raio, o gesto não é circular e nenhum arco o representa. Na Sens os arcos
+         desviam 0,7 a 2,8 un num raio de 400 — 0,2 a 0,7%.
+         “voltas” é o percurso dividido pelo comprimento do arco: perto de 1 é uma
+         passada só, 4 ou 10 é vaivém — o episódio engoliu várias passadas da mão e
+         nenhum círculo passa por cima disso. “dev 1/2/3 arcos” testa a prescrição da
+         §5.2 contra esta captura: se partir em 3 não derruba o desvio abaixo de 10%,
+         o problema não é a geometria, é o episódio ser longo demais.
+         Traços vivos simultâneos: <b>máx. ${saude.maxSimultaneos}</b> —
+         ${saude.quadrosAtivos} quadro(s) com traço vivo,
+         ${saude.quadrosSilenciando} deles com movimento ignorado em outro ponto.</p>
+    </section>
+    <section><h4>Coesão — os vazios que foram fechados</h4>
+      ${!COESAO_LIGADA ? `<p>desligada por ora (decisão da cliente) — os arcos ficam onde o gesto os pôs.
+            Em movimento, vê-los deslizar uns na direção dos outros depois de cada gesto ficou estranho.
+            ?coesao=1 traz de volta.</p>`
+        : !coesao ? `<p>ainda não rodou.</p>`
+        : `<table>
+        <tr><th>medida</th><th>valor</th><th>o que significa</th></tr>
+        <tr><td>aperto geral</td><td>${(COESAO_PUXA*100).toFixed(0)}% do vazio até o centroide</td>
+            <td>maior deslocamento: ${num(coesao.puxa)}px</td></tr>
+        <tr><td>conexões forçadas</td>
+            <td class="${coesao.grupos<=1?'passa':'morre'}">${coesao.passos.length}</td>
+            <td>${coesao.passos.length
+                 ? coesao.passos.map(x => `arco ${x.i+1}↔${x.k+1}: folga ${num(x.folga)}px, andou ${num(x.anda)}px`).join("; ")
+                 : "nenhuma — os arcos já se encostavam"}</td></tr>
+        <tr><td>grupos soltos ao fim</td>
+            <td class="${coesao.grupos<=1?'passa':'morre'}">${coesao.grupos}</td>
+            <td>1 = a composição é uma peça só, que é o alvo</td></tr>
+        <tr><td>mordida</td><td>${COESAO_MORDIDA} espessuras = ${num(espessuraDe(composicao)*COESAO_MORDIDA,1)}px</td>
+            <td>penetração ao encostar: tangência não gera cruzamento dentro do span
+                dos dois arcos, e sem cruzamento a regra das juntas não tem onde rodar</td></tr>
+        </table>
+        <p>A passada translada arcos INTEIROS, rígidos, e só depois de restaurar o centro
+           original — idempotente pelo mesmo motivo da §5.3. Raio, extensão, sentido e
+           orientação continuam saindo do gesto: o que muda é a distância entre os arcos.
+           É a única regra do sistema que a spec não pede — a §5.2 diz "nunca rearranjado
+           em torno de um centro comum", e essa frase foi escrita contra os templates da §6,
+           em que o gesto entrava só como semente. Aqui a proveniência está intacta.</p>`}
+    </section>
+    <section><h4>Composição — os arcos do resultado</h4>
+      ${composicao.length ? `<table>
+        <tr><th></th><th>#</th><th>episódio</th><th>FUGA<br>mediana / pior</th>
+            <th>raio<br>gesto → desenhado</th><th>span<br>gesto → desenhado</th>
+            <th>desvio do ajuste</th><th>amostras</th></tr>
+        ${composicao.map((a,i) => { const f = fugaDoArco(a), esp = espessuraDe(composicao);
+          const rel = f ? f.pior/esp : null;
+          return `<tr>
+          <td><span style="display:inline-block;width:10px;height:10px;background:${a.vivo?'#FFF':corDoEpisodio(a.episodio)}"></span></td>
+          <td>${i+1}${a.vivo?" vivo":""}</td>
+          <td>${a.episodio ? a.episodio.nome : "—"}</td>
+          <td class="${rel==null?'':rel<2?'passa':rel<5?'':'morre'}">${f
+              ? num(f.mediana)+" / "+num(f.pior)+"px = "+(f.pior/esp).toFixed(1)+" esp."
+              : "—"}</td>
+          <td class="${a.rGesto && (a.r/a.rGesto<0.5 || a.r/a.rGesto>2) ? 'morre':''}">${num(a.rGesto)} → ${num(a.r)}
+              ${a.rGesto ? "("+(a.r/a.rGesto).toFixed(2)+"×)" : ""}</td>
+          <td class="${a.spanPreso?'morre':''}">${num((a.spanBruto||0)*180/Math.PI)}° → ${num(a.span*180/Math.PI)}°
+              ${a.spanPreso ? "<br>PRESO NO "+(a.spanPreso==="curto"?"MÍNIMO":"TETO") : ""}</td>
+          <td class="${a.devGesto<0.10?'passa':'morre'}">${(a.devGesto*100).toFixed(1)}%</td>
+          <td>${a.nPts}</td></tr>`; }).join("")}
+        </table>
+        <p><b>FUGA</b> é a distância de cada ponto do trecho de gesto até o arco desenhado — a
+           única medida aqui que compara o TRAÇO com o MOVIMENTO. Todas as outras comparam o
+           gesto com o círculo ajustado, e um gesto pode caber perfeitamente num círculo e mesmo
+           assim virar um traço longe dele: entre o ajuste e o desenho, a §5.5 troca o raio medido
+           por raio de fonte (${num(R_ARCO_MIN)}–${num(R_ARCO_MAX)}px) e prende o span entre 25° e 210°.
+           Abaixo de 2 espessuras o traço está em cima do movimento; acima de 5 ele está solto
+           perto dele. As colunas de raio e span dizem QUAL das duas trocas o empurrou.</p>
+        <p>${composicao.length} arco(s) de ${episodios.filter(e=>e.aceito).length} episódio(s),
+           no máximo ${MAX_ARCOS} por episódio. Espessura ${num(espessuraDe(composicao),1)}px =
+           raio médio ÷ 30 (§5.5), uma só para toda a composição porque a Sens é monolinear.
+           Faixa de raio permitida: ${num(R_ARCO_MIN)}–${num(R_ARCO_MAX)}px
+           (0,20–0,32 de viewMin). Span alvo da fonte: 161°.
+           Enquadramento ${moldura.k.toFixed(2)}×.</p>
+        <p>k arcos só são aceitos se derrubarem o pior trecho a ${GANHO_MIN}<sup>k−1</sup> do
+           que UM arco dava (corte de bom o bastante: ${(DEV_OK*100).toFixed(0)}%) — 2 arcos
+           precisam de ${(GANHO_MIN*100).toFixed(0)}%, 3 de ${(GANHO_MIN*GANHO_MIN*100).toFixed(0)}%.
+           A exigência cresce com o número de arcos: é ela que impede o “carimbo de arcos”
+           que a §6 registra como rejeitado. Todos os k são avaliados — comparar cada k só
+           com o anterior fazia o laço sair num degrau raso e nunca olhar para baixo.</p>
+        <p>A forma de cada arco não foi rearranjada: raio, extensão e sentido são os do
+           trecho de gesto, e o ponto médio do trecho manda na posição. A passada de coesão
+           acima translada o conjunto para fechar os vazios — é a única coisa que mexe em
+           onde os arcos estão.</p>`
+        : `<p class="morre">Nenhum arco: ${episodios.filter(e=>e.aceito).length} episódio(s) aceito(s).</p>`}
+    </section>
+    <section><h4>Juntas — a composição contra o alfabeto medido</h4>
+      ${(() => {
+        if (!composicao.length) return `<p class="morre">Nenhum arco.</p>`;
+        const pontas = composicao.length*2;
+        const naJunta = composicao.reduce((n,a) => n + (a.juntaIni?1:0) + (a.juntaFim?1:0), 0);
+        const angs = [];
+        for (const a of composicao) for (const c of a.cruz) angs.push(c.ang*180/Math.PI);
+        angs.sort((x,y) => x-y);
+        const q = f => angs.length ? angs[Math.min(angs.length-1, Math.floor(f*angs.length))] : null;
+        const avancos = [];
+        for (const a of composicao){
+          if (a.juntaIni) avancos.push(a.juntaIni.avanco*180/Math.PI);
+          if (a.juntaFim) avancos.push(a.juntaFim.avanco*180/Math.PI);
+        }
+        const mAv = avancos.length ? avancos.reduce((x,y)=>x+y,0)/avancos.length : null;
+        const esp = espessuraDe(composicao);
+        const pct2 = Math.round(naJunta/pontas*100);
+        return `<table>
+          <tr><th>atributo</th><th>na fonte Sens</th><th>nesta composição</th></tr>
+          <tr><td>terminais que morrem numa junta</td><td>205 de 252 = 81%</td>
+              <td class="${pct2>=40?'passa':''}">${naJunta} de ${pontas} = ${pct2}%</td></tr>
+          <tr><td>avanço além do cruzamento</td><td>19° · ≈6 espessuras</td>
+              <td>${mAv!=null ? num(mAv,1)+"° · "+num(mAv*Math.PI/180*composicao[0].r/esp,1)+" espessuras" : "—"}</td></tr>
+          <tr><td>ângulo de cruzamento</td><td>mediana 28° · p25 9° · p75 37°</td>
+              <td>${angs.length ? "mediana "+num(q(.5))+"° · p25 "+num(q(.25))+"° · p75 "+num(q(.75))+"°" : "nenhum cruzamento"}</td></tr>
+          <tr><td>cruzamentos</td><td>rasos, quase tangentes</td>
+              <td>${angs.length} cruzamento(s) em ${composicao.length} arcos</td></tr>
+          <tr><td>span de arco que não cruza</td><td>mediana 161°</td>
+              <td>${composicao.filter(a=>!a.cruz.length).length} arco(s) livre(s),
+                  ${composicao.filter(a=>a.teto).length} aparado(s) pelo teto</td></tr>
+        </table>
+        <p>A passada roda sobre a composição INTEIRA, não dentro de cada símbolo — dois arcos de
+           gestos diferentes se cruzam igual, e a junta não sabe de episódios. Ela restaura
+           baseStart/baseExtent antes de cortar, então pode rodar quantas vezes for preciso sem
+           os arcos encolherem. O ângulo de cruzamento é MEDIDO, não imposto: forçar o ângulo
+           arrastaria o arco para longe do gesto.</p>
+        <p>Terminal solto não é defeito: 47 dos 252 terminais do alfabeto terminam no espaço.</p>`;
+      })()}
+    </section>
+    <section><h4>Fusão nas juntas — o filtro gooey</h4>
+      ${(() => {
+        const esp = espessuraDe(composicao);
+        return `<table>
+          <tr><th>atributo</th><th>na fonte Sens</th><th>aqui</th></tr>
+          <tr><td>cantos côncavos pontudos</td><td>0 de 196 medidos</td>
+              <td>${GOO_LIGADO ? "nenhum — filtro ligado" : "TODOS — filtro desligado (?goo=0)"}</td></tr>
+          <tr><td>raio do filete côncavo</td><td>0,75 × a espessura</td>
+              <td>efeito do blur, não parâmetro</td></tr>
+          <tr><td>sigma do blur de entrada</td><td>—</td>
+              <td>${GOO_BLUR_RATIO} × espessura = ${num(esp*GOO_BLUR_RATIO,2)}px</td></tr>
+          <tr><td>degrau de alfa</td><td>—</td>
+              <td>ganho ${GOO_ALPHA_GAIN}, viés ${GOO_ALPHA_BIAS} — corte em alfa ${(-GOO_ALPHA_BIAS/GOO_ALPHA_GAIN).toFixed(2)}</td></tr>
+          <tr><td>espessura do traço</td><td>constante, monolinear</td>
+              <td>${num(esp,1)}px — o filtro não pode mudá-la</td></tr>
+          <tr><td>espessura depois do filtro</td><td>idêntica (critério da §5.4)</td>
+              <td class="passa">0,993 da original — medido por soma de alfa subpixel</td></tr>
+          <tr><td>alcance da ponta</td><td>semicírculo perfeito</td>
+              <td class="morre">0,755 da original — o gooey come convexo e preenche côncavo</td></tr>
+        </table>
+        <p>GOO_BLUR_RATIO é o SIGMA DO BLUR DE ENTRADA, não o raio do filete que aparece.
+           São coisas diferentes: o blur é a causa, o filete é o efeito. Usar 0,75 aqui — que
+           é o raio medido do filete — derrete o desenho num blob e as pontas somem.</p>
+        <p>Critério de aceitação: a espessura aparente tem de ser idêntica à de antes do
+           filtro. A única diferença visível é o canto côncavo arredondado onde dois traços se
+           cruzam. Compare com <code>?goo=0</code>.</p>
+        <p>Dentro do canvas offscreen todo traço é desenhado com alfa 1 — alfa parcial é
+           apagado inteiro pelo limiar. O fade da etapa 5 entra depois do filtro.</p>
+        <p>Erosão da ponta é INERENTE ao gooey: blur mais limiar preenche canto côncavo e
+           come extremidade convexa, e o terminal da Sens é convexo. Medido: blur 0,20 preserva
+           a ponta inteira e quase não funde; 0,30 funde e tira um quarto do alcance da ponta.
+           0,30 é o valor que a §5.4 dá como validado. <code>?goo=0</code> compara.</p>`;
+      })()}
+    </section>
+    <section><h4>Como ler os percentis</h4>
+      <p>Velocidade entre amostras consecutivas, antes do corte de salto.</p>
+      <p><b>p10 e p25</b> dizem onde está o repouso. É de lá que ${"V_ATIVA"} deveria sair:
+         o limiar precisa ficar ACIMA do p25 para separar parado de gesto. Se o p25 já
+         está acima de ${num(V_ATIVA())} px/s (marcado em vermelho), a mão nunca fica abaixo do
+         limiar enquanto gesticula — a regra “o primeiro que cruza vence” dispara de
+         imediato e não discrimina nada, e o traço só fecha na pausa.</p>
+      <p><b>p90 contra p99</b> diz quanto ainda é artefato. Separação de uma ordem de
+         grandeza significa que dá para cortar o erro sem cortar o gesto; separação de
+         2× significa que não dá, e o teto (hoje ${SALTO_LARGURAS} larguras de cena por
+         segundo = ${V_SALTO} px/s) só pode cortar o indefensável.</p>
+    </section>
+    <section><h4>Etapa 4 de 5</h4>
+      <p>Captura, arbitragem, redução a arcos, regra das juntas e fusão. O rastro cru aparece
+         só aqui, sob o diagnóstico — no modo normal só o arco existe. Falta a experiência ao
+         vivo (5): arcos persistentes, cálculo incremental, interpolação com inércia.</p>
+    </section>`;
+}
+
+/* ===================== telas ===================== */
+function vai(e){
+  estado = e;
+  $("c-repouso").hidden = e !== "repouso";
+  $("c-calibra").hidden = e !== "calibra";
+  $("c-conta").hidden   = e !== "conta";
+  $("c-erro").hidden    = e !== "erro";
+  $("ctrl").hidden      = e !== "resultado";
+  $("ctrl-fonte").hidden = false;   // a escolha de leitura fica sempre alcançável
+  $("relogio").hidden   = e !== "grava";
+  $("barra").hidden     = e !== "grava";
+  $("fase-hud").hidden  = !(diagLigado && (e === "grava" || e === "calibra"));
+  pinta();
+}
+function erro(msg){ $("t-erro").textContent = msg; vai("erro"); }
+
+/* ===================== câmera ===================== */
+async function ligaCamera(){
+  $("t-calibra").textContent = "Carregando…"; vai("calibra");
+  zera();
+  let fluxo;
+  try{
+    fluxo = await navigator.mediaDevices.getUserMedia({video:{width:640, height:480, facingMode:"user"}});
+  }catch(e){
+    return erro("A câmera não foi liberada. Autorize o acesso no navegador e tente de novo, ou desenhe com o dedo.");
+  }
+  video.srcObject = fluxo; await video.play();
+  try{
+    const mod = await import(`${jsd}/vision_bundle.mjs`);
+    fonte.mod = mod;
+    const fs = await mod.FilesetResolver.forVisionTasks(`${jsd}/wasm`);
+    try { detector = await fonte.cria(fs, "GPU"); delegateUsado = "GPU"; }
+    catch(e){ detector = await fonte.cria(fs, "CPU"); delegateUsado = "CPU (GPU falhou)"; }
+  }catch(e){
+    fluxo.getTracks().forEach(t => t.stop());
+    saude.ultimoErro = String(e && e.message || e).slice(0, 200);
+    return erro("A leitura de corpo não carregou aqui — a página precisa buscar o modelo na internet.");
+  }
+  $("t-calibra").textContent = fonte.dica;
+  laco();
+}
+function laco(){
+  requestAnimationFrame(laco);
+  if (!detector || video.readyState < 2) return;
+  const agora = performance.now();
+
+  if (estado === "calibra" || estado === "grava"){
+    try{
+      const r = detector.detectForVideo(video, agora);
+      leituraAtual = fonte.le(r);
+      cruAtual = fonte.cru(r);
+      escalaAtual = fonte.escala ? fonte.escala(r) : null;
+    }catch(e){
+      saude.erros++; saude.ultimoErro = String(e && e.message || e).slice(0, 140);
+      leituraAtual = []; cruAtual = null; escalaAtual = null;
+    }
+  }
+
+  if (estado === "calibra"){
+    /* a calibragem roda a mesma leitura e os mesmos buffers da captura, sem a
+       máquina de estados. É aqui que a pessoa confere o ALCANCE antes de gravar:
+       se, acenando na calibragem, a velocidade do pulso não chega a V_ATIVA, ela
+       também não vai chegar nos 5s da captura — e isso se descobre agora, não
+       depois de um resultado vazio. */
+    const uteis = observa(leituraAtual, agora, escalaAtual);
+    const ok = uteis > 0;
+    $("b-gravar").hidden = !ok;
+    const pico = saude.porPonto.length ? Math.max(...saude.porPonto.map(p => p.vPico)) : 0;
+    $("t-calibra").textContent =
+        saude.erros > 20 ? "A leitura falhou neste aparelho."
+      : !saude.comPose  ? fonte.dica
+      : !ok             ? "O corpo aparece, mas os pontos que importam ainda não. " + fonte.dica
+      : pico >= V_ATIVA() ? "Pronto. São só pontos."
+      : "Pronto. Acene uma vez para conferir o alcance.";
+    talvezDiag(agora);
+    pinta(); return;
+  }
+  if (estado === "grava"){
+    processaQuadro(leituraAtual, agora, escalaAtual);
+    /* durante a captura quem toca a inércia é este laço, que já roda todo quadro.
+       Um segundo rAF só para animar pintaria a mesma cena duas vezes. */
+    if (ANIMA && composicao.some(a => a.des)) passoDeInercia(agora - (ultimoQuadro || agora - 16.7));
+    ultimoQuadro = agora;
+    pinta();
+    talvezDiag(agora);
+  }
+}
+
+/* o painel é HTML: reconstruí-lo a 60 Hz é desperdício e atrapalha a leitura */
+let ultimoDiag = 0;
+function talvezDiag(agora){
+  if (!diagLigado || agora - ultimoDiag < 120) return;
+  ultimoDiag = agora;
+  pintaDiag();
+}
+
+/* ===================== gravação ===================== */
+function zera(){
+  limpaBuffers();
+  ativo = null; fase = "procurando"; assentaAte = 0;
+  episodios = []; composicao = []; coesao = null; retomada = -1; vivo = null;
+  if (animando){ cancelAnimationFrame(animando); animando = 0; }
+  ultimoQuadro = 0;
+  moldura = {k:1, dx:0, dy:0}; molduraDes = null;
+  silenciados = MONITORADOS().map(() => 0);
+  vAgora = MONITORADOS().map(() => 0);
+  leituraAtual = []; cruAtual = null;
+  zeraPontos();
+  saude.escalaVista = 0; saude.escalaMin = null; saude.escalaMax = null;
+  saude.quadros = saude.comPose = saude.comLeitura = saude.semLeitura = saude.erros = 0;
+  saude.quadrosAtivos = saude.quadrosSilenciando = saude.maxSimultaneos = 0;
+  saude.ultimoErro = ""; saude.t0 = saude.t1 = performance.now();
+}
+function contagem(){
+  zera();
+  let n = Math.round(CONTAGEM_MS/1000);
+  $("n-conta").textContent = n; vai("conta");
+  const t = setInterval(() => {
+    if (--n === 0){ clearInterval(t); grava(); } else $("n-conta").textContent = n;
+  }, 1000);
+}
+function grava(){
+  zera(); vai("grava");
+  const t0 = performance.now();
+  saude.t0 = t0;
+  (function tick(){
+    const d = performance.now() - t0;
+    $("relogio").textContent = (Math.max(0, CAPTURA_MS-d)/1000).toFixed(1) + "s";
+    $("barra").style.width = (Math.min(1, d/CAPTURA_MS)*100) + "%";
+    if (d < CAPTURA_MS) requestAnimationFrame(tick);
+    else encerra(performance.now());
+  })();
+}
+function encerra(agora){
+  relogio = agora;
+  if (ativo) fixa(agora, "fim da captura");   // e este último episódio já se incorpora
+  cruAtual = null; leituraAtual = []; escalaAtual = null;
+
+  /* A redução já rodou, uma vez por episódio, no instante em que cada um fechou.
+     Aqui não se reconstrói nada: reconstruir seria trocar os arcos que já estão
+     na tela por outros, que é exatamente o que a §6 proíbe. O que falta é só o
+     enquadramento — que durante a captura fica em 1:1 de propósito, para o traço
+     cair onde a mão passou, e só agora pode centralizar o que existe. */
+  refazPassadas();
+  /* O ZOOM DE FECHAMENTO TAMBÉM SAIU, pelo mesmo motivo: a cena inteira
+     mudando de escala logo depois do último gesto tira o traço de onde a pessoa
+     acabou de fazê-lo. Sem ele, o desenho fica exatamente onde a mão passou, do
+     primeiro quadro ao último — que é o mesmo princípio que já valia durante a
+     captura. ?enquadra=1 traz de volta. */
+  if (ENQUADRA_FIM){
+    /* congela o enquadramento em vigor (1:1, o da captura) ANTES de trocar o
+       alvo: é essa diferença que a inércia percorre, e é ela que faz o símbolo
+       se centralizar e crescer em vez de aparecer já enquadrado. */
+    semeiaDesenho();
+    moldura = enquadra(composicao, espessuraDe(composicao));
+  }
+  vai("resultado");
+  animaComposicao();          // o símbolo se assenta e se enquadra
+  pintaDiag();
+}
+
+/* ===================== modo dedo =====================
+   Mesma máquina de estados, alimentada pelo ponteiro: serve para exercitar a
+   arbitragem e os limiares sem depender da câmera. */
+function ligaDedo(){
+  modoDedo = true;
+  fonte = { ...FONTES.pose, rotulo:"dedo", modelo:"—",
+            pontos:[{nome:"dedo", lm:-1}] };
+  zera(); vai("grava");
+  $("relogio").hidden = true; $("barra").hidden = true;
+  $("ctrl").hidden = false;
+  let desenhando = false;
+  const coord = ev => {
+    const r = tela.getBoundingClientRect();
+    return { x:1 - (ev.clientX-r.left)/r.width, y:(ev.clientY-r.top)/r.height };
+  };
+  tela.style.touchAction = "none";
+  tela.addEventListener("pointerdown", e => {
+    desenhando = true; e.preventDefault();
+  });
+  tela.addEventListener("pointermove", e => {
+    if (!desenhando) return;
+    const c = coord(e);
+    processaQuadro([{i:0, x:c.x, y:c.y}], performance.now(), OMBROS_REF);
+    pinta(); talvezDiag(performance.now()); e.preventDefault();
+  });
+  window.addEventListener("pointerup", () => {
+    if (!desenhando) return;
+    desenhando = false;
+    const agora = performance.now();
+    if (ativo) fixa(agora, "soltou");   // fixa() já incorpora o episódio
+    saude.t1 = agora;
+    moldura = {k:1, dx:0, dy:0};        // no dedo o traço fica onde foi feito
+    animaComposicao(); pintaDiag();
+  });
+}
+
+/* ===================== controles ===================== */
+/* Trocar de leitura depois que a câmera ligou exige recriar o detector e o
+   modelo. A versão anterior simplesmente não fazia nada nesse caso — e sem dizer
+   nada, o que rendeu três sessões seguidas em Pose quando o que se queria era
+   comparar com Hands. A escolha vai para a URL e a página recarrega: é uma
+   troca de modelo, não de variável. */
+function escolheFonte(f){
+  if (FONTES[f] === fonte && !detector){
+    marcaFonte(f); return;
+  }
+  if (!detector){ fonte = FONTES[f]; marcaFonte(f); zera(); return; }
+  const u = new URL(location.href);
+  u.searchParams.set("fonte", f);
+  location.replace(u.toString());
+}
+function marcaFonte(f){
+  $("f-pose").setAttribute("aria-pressed", String(f === "pose"));
+  $("f-mao").setAttribute("aria-pressed", String(f === "mao"));
+}
+function alternaDiag(){
+  diagLigado = !diagLigado;
+  $("diag").hidden = !diagLigado;
+  $("b-diag").setAttribute("aria-pressed", String(diagLigado));
+  $("fase-hud").hidden = !(diagLigado && (estado === "grava" || estado === "calibra"));
+  if (diagLigado) pintaDiag();
+  pinta();
+}
+$("b-camera").onclick = ligaCamera;
+$("b-dedo").onclick = ligaDedo;
+$("b-dedo2").onclick = ligaDedo;
+$("b-gravar").onclick = contagem;
+$("b-diag").onclick = alternaDiag;
+$("f-pose").onclick = () => escolheFonte("pose");
+$("f-mao").onclick  = () => escolheFonte("mao");
+$("b-refazer").onclick = () => {
+  zera();
+  if (modoDedo){ vai("grava"); $("relogio").hidden = true; $("barra").hidden = true; $("ctrl").hidden = false; }
+  else if (detector) vai("calibra");
+  else vai("repouso");
+  pinta(); pintaDiag();
+};
+addEventListener("keydown", e => {
+  if (e.key === "d" || e.key === "D"){
+    if (/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "")) return;
+    alternaDiag();
+  }
+});
+/* Durante as etapas de reconstrução o diagnóstico nasce LIGADO: com a cena preta
+   em modo normal, desligá-lo é a diferença entre "não gravou nada" e saber qual
+   porta fechou. Desliga em ?diag=0 — e, quando a etapa 5 estiver de pé, o padrão
+   volta a ser desligado. */
+if (!location.search.includes("diag=0")) alternaDiag();
+
+const fonteURL = new URLSearchParams(location.search).get("fonte");
+if (fonteURL && FONTES[fonteURL]) fonte = FONTES[fonteURL];
+marcaFonte(fonte.id);
+
+zera();
+pinta();
+
+/* exposto para inspeção no console e para alimentar a máquina com uma leitura
+   sintética, sem câmera — é assim que a arbitragem se testa de verdade */
+window.PLC = {
+  get episodios(){return episodios}, get ativo(){return ativo}, get fase(){return fase},
+  get buf(){return buf}, get silenciados(){return silenciados}, get saude(){return saude},
+  get fonte(){return fonte}, get composicao(){return composicao}, get moldura(){return moldura},
+  get coesao(){return coesao}, get vivo(){return vivo}, aproxima, viradaEm, folgaEntre, cruzamentosDe,
+  get molduraDes(){return molduraDes}, animaComposicao, semeiaDesenho, erroDoDesenho, desenhoDe,
+  passoDeInercia, fugaDoArco, corDoEpisodio, paraOndeEsta,
+  reduzAArcos, arcoDeTrecho, circulo, spanDe, reamostra, pontosDoArco, espessuraDe, enquadra,
+  applyCompositionJoints, cruzaCirculos, anguloCruzamento, offsetNoArco, deslocamento,
+  pintaComposicao, get off(){return off}, get off2(){return off2},
+  G: { GOO_BLUR_RATIO, GOO_ALPHA_GAIN, GOO_ALPHA_BIAS, GOO_FILETE, GOO_LIGADO },
+  processaQuadro, percurso, amplitude, velocidade, pinta, pintaDiag,
+  teste: {
+    inicia(t){ zera(); if (t != null) saude.t0 = saude.t1 = t; estado = "grava"; vai("grava"); },
+    /* o mesmo que laco() faz na fase "grava", inclusive a inércia: sem isso o
+       teste mediria uma composição que salta, e o produto não salta. */
+    quadro(leituras, t, escala){
+      const dt = ultimoQuadro ? t - ultimoQuadro : 16.7;
+      ultimoQuadro = t;
+      processaQuadro(leituras, t, escala);
+      if (ANIMA && composicao.some(a => a.des)) passoDeInercia(dt);
+      pinta();
+    },
+    encerra(t){ encerra(t); },
+    /* roda a inércia sem o relógio do navegador, para a animação ser mensurável */
+    anima(maxQuadros = 600){
+      let n = 0;
+      while (n < maxQuadros && composicao.some(a => a.des)){ passoDeInercia(16.7); n++; }
+      pinta();
+      return n;
+    }
+  },
+  P: { get V_ATIVA(){return V_ATIVA()}, get V_PAUSA(){return V_PAUSA()},
+       ESCALA_ATIVA, ESCALA_PAUSA, get ombros(){return ombros}, PAUSA_MS, ASSENTA_MS, JANELA_MS, MEM_MS, COMP_MIN, RETRO,
+       CONTAGEM_MS, CAPTURA_MS, W, H, VIEW_MIN,
+       R_BASE, R_FAIXA, WIDTH_RATIO, MEDIAN_EXTENT, JOINT_OVERSHOOT, CROSSING_ANGLE, MAX_ARCOS,
+       VIRADA_MS, VIRADA_RET, VIRADA_PISO, VIRADA_VOLTA, VIRADA_IDAS,
+       get VIRADA_MIN(){return VIRADA_MIN()}, get VIRADA_EXC(){return VIRADA_EXC()},
+       COESAO_LIGADA, COESAO_PUXA, COESAO_MORDIDA, COESAO_CONTATO, DEV_OK, GANHO_MIN,
+       VIVO_AMOSTRAS,
+       INERCIA_TAU, INERCIA_PARA, INERCIA_TETO, ANIMA, ENQUADRA_FIM, CONGELA, RAIO_DO_GESTO, CORRENTE }
+};
+</script>
