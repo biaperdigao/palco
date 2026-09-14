@@ -298,7 +298,12 @@ const BOLA_FOLGA = 3.5;     // espessuras de vazio entre o desenho e o ponto
    por cima. Nenhum ajuste na lógica da bola resolve isso; o desenho é que
    precisa caber com folga. Como efeito colateral, a composição fica mais
    centralizada, que é o que a cliente já tinha pedido. */
-const DESENHO_RAIO = 0.36 * VIEW_MIN;   // 259px de alcance máximo a partir do centro
+const DESENHO_RAIO = 0.36 * VIEW_MIN;   // 259px — a borda do palco, onde o traço acaba
+/* e o arco NASCE bem dentro dela. Sem essa folga, ele é contido exatamente na
+   borda e o primeiro quadro de crescimento já a ultrapassa: a corrente dispara,
+   nasce outro na borda, dispara de novo — medido, 22 arcos onde deviam ser 5.
+   Nascer a 70% do raio dá espaço para o traço acontecer antes de chegar ao fim. */
+const NASCE_RAIO = 0.70 * DESENHO_RAIO;
 const BOLA_MARGEM = 0.03;   // do viewMin, para o ponto não encostar na borda
 
 /* --- CARÊNCIA DE PERDA ---
@@ -1374,8 +1379,6 @@ function atualizaVivo(){
     if (span > vivo.span && span < SPAN_MAX_ARCO){
       vivo.span = span; vivo.baseExtent = span; vivo.spanBruto = span;
       vivo.trecho = reamostra(ativo.pts);
-      const recuo = contemNoDesenho(vivo);        // esticou demais: recua com a âncora
-      vivo.ancora = { x: vivo.ancora.x + recuo.dx, y: vivo.ancora.y + recuo.dy };
     }
   }
   if (ativo.pts.length < VIVO_AMOSTRAS) return;   // medida de menos para um círculo
@@ -1427,20 +1430,30 @@ function atualizaVivo(){
        O ajuste novo é TRANSLADADO para que seu começo caia na âncora. Translação
        pura: forma, raio, extensão, sentido e orientação continuam sendo os que o
        ajuste mediu. O que deixa de acontecer é o escorregão. */
-    const ini = pontaInicial(a);
-    const dx = vivo.ancora.x - ini.x, dy = vivo.ancora.y - ini.y;
-    a.ox += dx; a.oy += dy; a.baseOx += dx; a.baseOy += dy;
-    /* e se, crescendo, ele passar do disco do desenho, recua — levando a âncora
-       junto, para não voltar a escorregar no quadro seguinte */
-    const recuo = contemNoDesenho(a);
-    vivo.ancora = { x: vivo.ancora.x + recuo.dx, y: vivo.ancora.y + recuo.dy };
-
+    /* ORDEM IMPORTA: a guarda de span monotônico recentra o arco sobre o ponto
+       médio, o que desfaz a translação da âncora. Com ela depois, o início
+       saltava 41px no quadro em que o arco herdado passa a usar o ajuste
+       próprio, e voltava em seis quadros. A guarda vem primeiro; a âncora, por
+       último, sempre. */
     if (a.span < vivo.span){
-      const angM = a.a0 + a.s*a.span/2;            // o meio do arco novo
+      const angM = a.a0 + a.s*a.span/2;
       a.span = vivo.span;
       a.a0 = angM - a.s*a.span/2;
       a.baseExtent = a.span; a.baseStart = a.a0;
     }
+    const ini = pontaInicial(a);
+    const dx = vivo.ancora.x - ini.x, dy = vivo.ancora.y - ini.y;
+    a.ox += dx; a.oy += dy; a.baseOx += dx; a.baseOy += dy;
+    /* E AQUI NÃO SE ARRASTA MAIS NADA. Conter um arco que CRESCE significa puxá-lo
+       para o centro a cada quadro, com a âncora junto — medido, a âncora de um
+       gesto feito no canto andava 124px e o traço se aproximava 36px do centro
+       durante a própria execução. Era o "os traços ainda são feitos fora e vão
+       para o centro", e vinha do limite que eu criei para a bola ter órbita.
+       O arco é contido UMA VEZ, no nascimento. Se ao crescer ele passar do
+       disco, o traço ACABA ali — a corrente fecha este e começa outro, que é o
+       mesmo tratamento de quando ele enche de span ou de tempo. Chegar na borda
+       do palco é uma forma de estar pronto. */
+
     adotaGeometria(congela(vivo), a);              // o ALVO muda; a identidade não
   }
 }
@@ -1498,12 +1511,12 @@ function incorpora(e){
     }
     vivo.vivo = false; vivo.episodio = e;
     for (const a of arcos.slice(1)){
-      a.episodio = e; contemNoDesenho(a);
+      a.episodio = e; contemNoDesenho(a, DESENHO_RAIO);
       a.des = geometriaDeNascimento(a); composicao.push(a);
     }
     vivo = null;
   } else {
-    for (const a of arcos){ a.episodio = e; contemNoDesenho(a); composicao.push(a); }
+    for (const a of arcos){ a.episodio = e; contemNoDesenho(a, DESENHO_RAIO); composicao.push(a); }
     heranca = null;
   }
   if (e) e.arcos = Math.max(arcos.length, vivo ? 0 : (e.aceito ? 1 : 0));
@@ -1668,6 +1681,14 @@ function processaQuadro(leituras, agora, escalaBruta){
   if (CORRENTE && vivo && (vivo.spanBruto || 0) >= MEDIAN_EXTENT){
     fixa(agora, "arco cheio", agora);
     b.splice(0, Math.max(0, b.length - 3));   // recomeça daqui, com um fio de recuo
+    return;
+  }
+
+  /* 4b-bis · o arco chegou na borda do palco. Antes isto virava um arrasto para
+     dentro; agora fecha o traço, e o próximo nasce da mão onde ela está. */
+  if (CORRENTE && vivo && saiuDoDesenho(vivo)){
+    fixa(agora, "arco cheio", agora);
+    b.splice(0, Math.max(0, b.length - 3));
     return;
   }
 
@@ -1846,16 +1867,24 @@ const pontaInicial = g => ({ x: g.ox + Math.cos(g.a0)*g.r, y: g.oy + Math.sin(g.
 /* Puxa o arco para dentro do disco do desenho, por TRANSLAÇÃO: forma, raio,
    extensão e orientação intactos, só a posição cede. Devolve o quanto andou,
    para a âncora andar junto e o traço continuar crescendo de onde nasceu. */
-function contemNoDesenho(a){
+/* o arco já passou do disco do desenho? */
+function saiuDoDesenho(a){
+  const cx = W/2, cy = H/2;
+  for (const q of pontosDoArco(a, 32))
+    if (Math.hypot(q.x-cx, q.y-cy) > DESENHO_RAIO) return true;
+  return false;
+}
+
+function contemNoDesenho(a, raio = NASCE_RAIO){
   const cx = W/2, cy = H/2;
   let pior = 0, px = 0, py = 0;
   for (const q of pontosDoArco(a, 32)){
     const d = Math.hypot(q.x-cx, q.y-cy);
     if (d > pior){ pior = d; px = q.x; py = q.y; }
   }
-  if (pior <= DESENHO_RAIO) return { dx:0, dy:0 };
+  if (pior <= raio) return { dx:0, dy:0 };
   const e = Math.hypot(px-cx, py-cy) || 1;
-  const recuo = pior - DESENHO_RAIO;
+  const recuo = pior - raio;
   const dx = -(px-cx)/e*recuo, dy = -(py-cy)/e*recuo;
   a.ox += dx; a.oy += dy; a.baseOx += dx; a.baseOy += dy;
   return { dx, dy };
@@ -2851,7 +2880,7 @@ window.PLC = {
        CONTAGEM_MS, CAPTURA_MS, W, H, VIEW_MIN,
        R_BASE, R_FAIXA, WIDTH_RATIO, MEDIAN_EXTENT, JOINT_OVERSHOOT, CROSSING_ANGLE, MAX_ARCOS,
        VIRADA_MS, VIRADA_RET, VIRADA_PISO, VIRADA_VOLTA, VIRADA_IDAS,
-       PALCO_RAIO, TRACO_MS, BOLA_RAIO, BOLA_FOLGA, BOLA_MARGEM, DESENHO_RAIO, PERDA_MS,
+       PALCO_RAIO, TRACO_MS, BOLA_RAIO, BOLA_FOLGA, BOLA_MARGEM, DESENHO_RAIO, NASCE_RAIO, PERDA_MS,
        get VIRADA_MIN(){return VIRADA_MIN()}, get VIRADA_EXC(){return VIRADA_EXC()},
        COESAO_LIGADA, COESAO_PUXA, COESAO_MORDIDA, COESAO_CONTATO, DEV_OK, GANHO_MIN,
        VIVO_AMOSTRAS,
