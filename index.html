@@ -319,16 +319,19 @@ const RAIO_DO_GESTO = location.search.includes("raio=gesto");
    arcos que se encontram, em vez de um arco de 161° com 124° de movimento sem
    traço nenhum em cima. É como a Sens é construída — nenhum arco vai muito além
    de 161°, eles se cruzam — e preserva o "ficou no lugar", porque o arco que
-   fecha não se mexe mais. ?corrente=1 liga. */
-const CORRENTE = location.search.includes("corrente=1");
+   fecha não se mexe mais. LIGADA POR PADRÃO, escolhida pela cliente contra as
+   outras variantes; ?corrente=0 desliga. */
+const CORRENTE = !location.search.includes("corrente=0");
 
 /* --- tempos (§5.6) --- */
 const CONTAGEM_MS = 3000;
 /* A §5.6 registra 5s, e que 3s "também foi testado; 5s deu resultado melhor".
-   Voltando para 3s por decisão da cliente. Aquele teste era outro sistema: Pose
-   em vez de Hands, limiares em px/s fixos, e sem o aparo de cauda — a comparação
-   que motivou os 5s não se aplica mais. */
-const CAPTURA_MS  = 3000;
+   Foi para 3s por decisão da cliente e VOLTOU para 5s pela mesma via, depois de
+   ver o traço ao vivo. Faz sentido: com o desenho aparecendo durante a captura,
+   os 3s que bastavam para registrar um gesto não bastam para a pessoa VER o que
+   está fazendo e responder a isso. O que era tempo de gravação virou tempo de
+   conversa. */
+const CAPTURA_MS  = 5000;
 
 /* --- geometria (§5.5) — usada a partir da etapa 2, registrada aqui para não
        ser re-derivada. raio = viewMin * (0,20 + norm * 0,12). --- */
@@ -1207,6 +1210,15 @@ function refazPassadas(){
    da pessoa é a "substituição" da §6. Partir no assentamento é uma batida
    natural — a mesma em que o arco para de seguir. */
 let vivo = null;
+/* O CÍRCULO DO ARCO QUE ACABOU DE ENCHER, para o seguinte continuar nele.
+   Sem isto, cada corte da corrente custa ~190ms sem traço nenhum: o episódio
+   novo precisa juntar VIVO_AMOSTRAS antes que o ajuste valha, e no meio de um
+   gesto contínuo isso é a caneta levantando do papel sem motivo. Mas o gesto
+   NÃO mudou de caráter — foi o arco que chegou no tamanho da fonte — então o
+   círculo de um instante atrás ainda é a melhor estimativa que existe. O arco
+   novo nasce nele, no ponto exato em que o anterior parou, e cresce com a mão
+   até o ajuste próprio ficar determinado e assumir. */
+let heranca = null;
 /* AMOSTRAS CRUAS, não reamostradas. A distinção decidiu o comportamento: o
    trecho entre um gesto e o seguinte é quase reto e a mão o percorre em 4 ou 5
    quadros, então o percurso passa de COMP_MIN com pouquíssima MEDIDA. reamostra
@@ -1218,6 +1230,36 @@ const VIVO_AMOSTRAS = 10;
 
 function atualizaVivo(){
   if (!ANIMA || !ativo) return;
+
+  /* continuidade da corrente: o traço não levanta do papel entre um arco e o
+     seguinte. Nasce no círculo herdado, começando onde o anterior terminou, e
+     o span é simplesmente até onde a mão já foi ao longo dele. */
+  if (!vivo && heranca && ativo.pts.length >= 2){
+    const q = ativo.pts[ativo.pts.length-1];
+    const ang = Math.atan2(q.y - heranca.oy, q.x - heranca.ox);
+    const span = deslocamento(heranca.a0, heranca.s, ang);
+    if (span > 0.02 && span < SPAN_MAX_ARCO){
+      vivo = { ox:heranca.ox, oy:heranca.oy, r:heranca.r, s:heranca.s,
+               a0:heranca.a0, span,
+               baseOx:heranca.ox, baseOy:heranca.oy,
+               baseStart:heranca.a0, baseExtent:span,
+               rGesto:heranca.r, devGesto:0, nPts:ativo.pts.length,
+               spanBruto:span, spanPreso:null, herdado:true,
+               vivo:true, cruz:[], trecho:reamostra(ativo.pts) };
+      vivo.des = geometriaDeNascimento(vivo);
+      composicao.push(vivo);
+    }
+  }
+
+  if (vivo && vivo.herdado){                      // ainda no círculo herdado: só estica
+    const q = ativo.pts[ativo.pts.length-1];
+    const ang = Math.atan2(q.y - vivo.oy, q.x - vivo.ox);
+    const span = deslocamento(vivo.a0, vivo.s, ang);
+    if (span > vivo.span && span < SPAN_MAX_ARCO){
+      vivo.span = span; vivo.baseExtent = span; vivo.spanBruto = span;
+      vivo.trecho = reamostra(ativo.pts);
+    }
+  }
   if (ativo.pts.length < VIVO_AMOSTRAS) return;   // medida de menos para um círculo
   if (percurso(ativo.pts) < COMP_MIN) return;     // ainda não é um gesto
   const p = reamostra(ativo.pts);
@@ -1233,6 +1275,7 @@ function atualizaVivo(){
   const a = arcoDeTrecho(p);
   if (!a) return;
   a.trecho = p;
+  if (vivo && vivo.herdado) vivo.herdado = false;   // o ajuste próprio assume
   if (!vivo){
     vivo = a;
     vivo.vivo = true; vivo.cruz = [];              // não participa das juntas
@@ -1303,6 +1346,9 @@ function incorpora(e){
   if (vivo){
     if (CONGELA){
       paraOndeEsta(vivo);
+      heranca = (e && e.motivo === "arco cheio")
+        ? { ox:vivo.ox, oy:vivo.oy, r:vivo.r, s:vivo.s, a0:vivo.a0 + vivo.s*vivo.span }
+        : null;
     } else if (arcos.length){
       /* o arco que a pessoa viu crescer NÃO some, aconteça o que acontecer com o
          episódio: se a redução devolveu trechos, ele vira o primeiro. */
@@ -1315,6 +1361,7 @@ function incorpora(e){
     vivo = null;
   } else {
     for (const a of arcos){ a.episodio = e; composicao.push(a); }
+    heranca = null;
   }
   if (e) e.arcos = Math.max(arcos.length, vivo ? 0 : (e.aceito ? 1 : 0));
   if (!composicao.length) return;
@@ -2291,7 +2338,7 @@ function talvezDiag(agora){
 function zera(){
   limpaBuffers();
   ativo = null; fase = "procurando"; assentaAte = 0;
-  episodios = []; composicao = []; coesao = null; retomada = -1; vivo = null;
+  episodios = []; composicao = []; coesao = null; retomada = -1; vivo = null; heranca = null;
   if (animando){ cancelAnimationFrame(animando); animando = 0; }
   ultimoQuadro = 0;
   moldura = {k:1, dx:0, dy:0}; molduraDes = null;
