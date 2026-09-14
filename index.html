@@ -685,8 +685,17 @@ function cruzamentosDe(geos){
 }
 
 function applyCompositionJoints(arcos){
-  /* 1 · restaurar a geometria do ajuste. A passada é idempotente por causa disto. */
+  /* 1 · restaurar a geometria do ajuste. A passada é idempotente por causa disto.
+        MAS NÃO PARA QUEM JÁ FECHOU. A §5.3 manda rodar a passada sempre que a
+        composição mudar, e isso significa APARAR DE NOVO os arcos antigos cada
+        vez que um novo cruza com eles — um traço que a pessoa terminou há dois
+        segundos encolhendo sozinho na tela. Medido com o registrador de
+        movimento: um arco já fechado andou 8,4 espessuras depois de pronto.
+        Um traço acabado não é mais reescrito. Ele continua servindo de parceiro
+        de cruzamento para os que vierem — a junta que o novo faz nele é do novo,
+        não dele. */
   for (const a of arcos){
+    if (a.congelado) continue;
     a.a0 = a.baseStart; a.span = a.baseExtent;
     a.cruz = []; a.juntaIni = null; a.juntaFim = null; a.teto = false;
   }
@@ -700,8 +709,8 @@ function applyCompositionJoints(arcos){
         const oA = offsetNoArco(A, X), oB = offsetNoArco(B, X);
         if (oA == null || oB == null) continue;     // fora do traço de um dos dois
         const th = anguloCruzamento(A, B);
-        A.cruz.push({ off:oA, com:k, ponto:X, ang:th });
-        B.cruz.push({ off:oB, com:i, ponto:X, ang:th });
+        if (!A.congelado) A.cruz.push({ off:oA, com:k, ponto:X, ang:th });
+        if (!B.congelado) B.cruz.push({ off:oB, com:i, ponto:X, ang:th });
       }
     }
 
@@ -714,6 +723,7 @@ function applyCompositionJoints(arcos){
         o outro terminal fica livre.
         Só encurta: a §5.3 diz CORTE 19° além dela, não estique até lá. */
   for (const a of arcos){
+    if (a.congelado) continue;                   // pronto é pronto
     a.cruz.sort((x,y) => x.off - y.off);
     const meio = a.span/2;
     const primeiro = a.cruz[0], ultimo = a.cruz[a.cruz.length-1];
@@ -1522,6 +1532,8 @@ function incorpora(e){
   if (e) e.arcos = Math.max(arcos.length, vivo ? 0 : (e.aceito ? 1 : 0));
   if (!composicao.length) return;
   refazPassadas();
+  /* e agora tudo o que já fechou está pronto: a passada seguinte não o toca mais */
+  for (const a of composicao) if (!a.vivo) a.congelado = true;
   /* o enquadramento NÃO se mexe durante a captura. Reenquadrar a cada gesto
      mudaria a escala do que já está na tela enquanto a pessoa ainda está se
      movendo, e o gesto seguinte não cairia onde ela mira. Fica 1:1 até o fim. */
@@ -2198,7 +2210,39 @@ function pintaComposicao(alfa = 1){
   pintaBola(esp, q, alfa);
 }
 
+/* ===================== o registrador de movimento =====================
+   Quatro hipóteses minhas sobre "o traço flutua" morreram contra a medição, e
+   todas as quatro foram testadas com gestos SINTÉTICOS. A captura real é que
+   tem de responder. Este registrador anda a cada quadro e guarda, por arco,
+   quanto a linha DESENHADA se mexeu depois de nascer — separando o que ela
+   cresceu do que ela andou.
+
+   "Andar" aqui é o deslocamento do ponto mais próximo: para cada ponto da linha
+   de um quadro, a distância até o ponto mais próximo da linha do quadro
+   anterior. Crescer não conta (o que já existia continua onde estava); deslizar
+   conta inteiro. É a mesma medida que separa as duas coisas no teste de salto. */
+function registraMovimento(){
+  for (const a of composicao){
+    const g = desenhoDe(a);
+    const pts = pontosDoArco(g, 16);
+    if (a._ant){
+      let pior = 0;
+      for (const u of a._ant){
+        let d = Infinity;
+        for (const v of pts) d = Math.min(d, (u.x-v.x)*(u.x-v.x) + (u.y-v.y)*(u.y-v.y));
+        pior = Math.max(pior, Math.sqrt(d));
+      }
+      a.andouMax = Math.max(a.andouMax || 0, pior);
+      a.andouTotal = (a.andouTotal || 0) + pior;
+      if (a.vivo) a.andouVivo = Math.max(a.andouVivo || 0, pior);
+      else        a.andouDepois = Math.max(a.andouDepois || 0, pior);
+    }
+    a._ant = pts;
+  }
+}
+
 function pinta(){
+  registraMovimento();
   ctx.setTransform(1,0,0,1,0,0);
   ctx.fillStyle = "#0A0A0A"; ctx.fillRect(0, 0, W, H);
   /* a composição aparece DURANTE a captura: os arcos nascem quando cada gesto
@@ -2364,6 +2408,14 @@ function pintaDiag(){
                  `/${e.fit.rel3!=null?(e.fit.rel3*100).toFixed(1):"?"}%]` : "") +
         (e.aceito?"":" REC")).join(", ") : "") +
     ` · arcos ${composicao.length}` +
+    /* o que cada arco ANDOU (não cresceu) depois de nascer, em espessuras:
+       durante o gesto / depois de o traço fechar. O segundo tem de ser ~0. */
+    (composicao.length ? (() => {
+      const esp = espessuraDe(composicao);
+      return " · andou " + composicao.map(a =>
+        `${((a.andouVivo||0)/esp).toFixed(1)}/${((a.andouDepois||0)/esp).toFixed(1)}`
+      ).join(" ") + " esp (vivo/depois)";
+    })() : "") +
     (composicao.length ? (() => {
       const esp = espessuraDe(composicao);
       const fs = composicao.map(a => ({ a, f: fugaDoArco(a) })).filter(x => x.f);
