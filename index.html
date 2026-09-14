@@ -272,6 +272,29 @@ const TRACO_MS = (() => {
   const m = /traco=(\d{2,5})/.exec(location.search);
   return m ? Math.min(5000, Math.max(150, +m[1])) : 800;
 })();
+const TRACO_FIXO = /traco=/.test(location.search);
+
+/* E O TETO SE ADAPTA À QUALIDADE DO DADO.
+   "Preciso testar se funciona rápido e no escuro; nem todo mundo vai abrir isso
+   no melhor ambiente e com a melhor câmera. Mas não pegar tudo não me incomoda:
+   é abstração." Então o alvo não é capturar mais — é o SÍMBOLO continuar bom
+   com menos.
+
+   Escuro e movimento rápido produzem o mesmo sintoma: quadros sem mão. Medido,
+   com 60% dos quadros perdidos, o teto de 800ms rende 8 arcos, 4,6 cruzamentos
+   e 1,8 arcos soltos; o mesmo dado com teto de 400ms rende 10,4 arcos, 9,0
+   cruzamentos e 0,8 soltos. Com menos dado, traços mais curtos aproveitam
+   melhor o que sobrou.
+
+   O sistema já sabe a qualidade do próprio dado — é a razão entre quadros com
+   leitura e quadros processados, a mesma que aparece como "util N/M" no
+   diagnóstico. Dado bom mantém os 800ms; dado ruim encolhe até 400. ?traco=
+   trava num valor fixo, para comparar. */
+const tracoAgora = () => {
+  if (TRACO_FIXO || !saude.quadros) return TRACO_MS;
+  const bom = saude.comLeitura/saude.quadros;
+  return TRACO_MS * (0.5 + 0.5*clamp01((bom - 0.30)/0.50));
+};
 
 /* --- A BOLA — o ponto de repouso ---
    A §1 diz que o rastro cru da mão nunca aparece, "nem ponto, nem bolinha". Esta
@@ -1708,7 +1731,7 @@ function processaQuadro(leituras, agora, escalaBruta){
      conta ângulo com sinal: um vaivém não o faz crescer, e o episódio engorda sem
      nunca encher — medido, volta 3,6 num episódio só. Meio segundo é meio
      segundo. */
-  if (agora - ativo.t0 >= TRACO_MS){
+  if (agora - ativo.t0 >= tracoAgora()){
     fixa(agora, "arco cheio", agora);        // mesmo tratamento: herda e continua
     b.splice(0, Math.max(0, b.length - 3));
     return;
@@ -2395,7 +2418,7 @@ function pintaDiag(){
     /* sem isto não dá para ler a captura de fora: os limiares são derivados do
        corpo, então dois resumos com os mesmos px/s podem estar em regimes
        completamente diferentes. */
-    `ombros ${num(ombros)} (abre ${num(V_ATIVA())} pausa ${num(V_PAUSA())} vira ${num(VIRADA_MIN())}px/${VIRADA_MS}ms exc ${num(VIRADA_EXC())}px) · ` +
+    `ombros ${num(ombros)} (abre ${num(V_ATIVA())} pausa ${num(V_PAUSA())} vira ${num(VIRADA_MIN())}px/${VIRADA_MS}ms exc ${num(VIRADA_EXC())}px traco ${num(tracoAgora())}ms) · ` +
     MONITORADOS().map((f,i) => { const pp = saude.porPonto[i]||{};
       return `${f.nome}: pico ${num(pp.vPico)}/${num(pp.vBruto)} ` +
              `p10 ${num(pct(pp.vs,0.10))} p25 ${num(pct(pp.vs,0.25))} p50 ${num(pct(pp.vs,0.5))} ` +
@@ -2936,7 +2959,7 @@ window.PLC = {
        CONTAGEM_MS, CAPTURA_MS, W, H, VIEW_MIN,
        R_BASE, R_FAIXA, WIDTH_RATIO, MEDIAN_EXTENT, JOINT_OVERSHOOT, CROSSING_ANGLE, MAX_ARCOS,
        VIRADA_MS, VIRADA_RET, VIRADA_PISO, VIRADA_VOLTA, VIRADA_IDAS,
-       PALCO_RAIO, TRACO_MS, BOLA_RAIO, BOLA_FOLGA, BOLA_MARGEM, DESENHO_RAIO, NASCE_RAIO, PERDA_MS,
+       PALCO_RAIO, TRACO_MS, get TRACO_AGORA(){return tracoAgora()}, BOLA_RAIO, BOLA_FOLGA, BOLA_MARGEM, DESENHO_RAIO, NASCE_RAIO, PERDA_MS,
        get VIRADA_MIN(){return VIRADA_MIN()}, get VIRADA_EXC(){return VIRADA_EXC()},
        COESAO_LIGADA, COESAO_PUXA, COESAO_MORDIDA, COESAO_CONTATO, DEV_OK, GANHO_MIN,
        VIVO_AMOSTRAS,
