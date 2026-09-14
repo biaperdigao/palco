@@ -284,6 +284,22 @@ const TRACO_MS = (() => {
    uma fila. Ele também não se funde com os arcos — fica isolado à parte, como no
    esboço do símbolo. */
 const BOLA_RAIO = 2.6;      // em espessuras de traço
+/* A BOLA FICA FORA DO DESENHO. No esboço do símbolo o ponto é "sólido, ISOLADO
+   À PARTE" — o repouso de Kandinsky não se mistura com a tensão dos arcos, ele
+   a contrapõe. Dentro do emaranhado ele vira mais um nó.
+   Então a mão manda na DIREÇÃO e o desenho manda na DISTÂNCIA: o ponto fica
+   sobre um círculo que contém toda a composição, mais uma folga. Conforme os
+   arcos nascem, ele recua — e a inércia faz esse recuo ser um deslize, não um
+   salto. Onde a pessoa terminar o gesto, ele para. */
+const BOLA_FOLGA = 3.5;     // espessuras de vazio entre o desenho e o ponto
+/* O DESENHO TEM DE DEIXAR A ÓRBITA LIVRE. Medido: numa composição real os arcos
+   alcançavam 349px do centro numa cena cuja metade útil é 322 — não existia
+   "fora" para o ponto ocupar, e ele ficava preso no teto com um arco varrendo
+   por cima. Nenhum ajuste na lógica da bola resolve isso; o desenho é que
+   precisa caber com folga. Como efeito colateral, a composição fica mais
+   centralizada, que é o que a cliente já tinha pedido. */
+const DESENHO_RAIO = 0.36 * VIEW_MIN;   // 259px de alcance máximo a partir do centro
+const BOLA_MARGEM = 0.03;   // do viewMin, para o ponto não encostar na borda
 
 /* --- CARÊNCIA DE PERDA ---
    O rastreador PISCA. Numa captura real de 208 quadros, o MediaPipe não achou a
@@ -1344,6 +1360,7 @@ function atualizaVivo(){
                vivo:true, cruz:[], trecho:reamostra(ativo.pts) };
       /* a âncora do arco herdado é o ponto exato onde o anterior parou — é o que
          dá continuidade à corrente, e ela já é fixa por construção. */
+      contemNoDesenho(vivo);
       vivo.ancora = pontaInicial(vivo);
       vivo.des = geometriaDeNascimento(vivo);
       composicao.push(vivo);
@@ -1357,6 +1374,8 @@ function atualizaVivo(){
     if (span > vivo.span && span < SPAN_MAX_ARCO){
       vivo.span = span; vivo.baseExtent = span; vivo.spanBruto = span;
       vivo.trecho = reamostra(ativo.pts);
+      const recuo = contemNoDesenho(vivo);        // esticou demais: recua com a âncora
+      vivo.ancora = { x: vivo.ancora.x + recuo.dx, y: vivo.ancora.y + recuo.dy };
     }
   }
   if (ativo.pts.length < VIVO_AMOSTRAS) return;   // medida de menos para um círculo
@@ -1381,6 +1400,7 @@ function atualizaVivo(){
     /* A ÂNCORA: onde o traço começa. Fixada no nascimento e nunca mais mexida.
        É o que faz o arco crescer a partir de onde nasceu, como uma caneta, em
        vez de escorregar enquanto é desenhado. */
+    contemNoDesenho(vivo);
     vivo.ancora = pontaInicial(vivo);
     vivo.des = geometriaDeNascimento(vivo);        // nasce no lugar e passa a seguir
     composicao.push(vivo);
@@ -1410,6 +1430,10 @@ function atualizaVivo(){
     const ini = pontaInicial(a);
     const dx = vivo.ancora.x - ini.x, dy = vivo.ancora.y - ini.y;
     a.ox += dx; a.oy += dy; a.baseOx += dx; a.baseOy += dy;
+    /* e se, crescendo, ele passar do disco do desenho, recua — levando a âncora
+       junto, para não voltar a escorregar no quadro seguinte */
+    const recuo = contemNoDesenho(a);
+    vivo.ancora = { x: vivo.ancora.x + recuo.dx, y: vivo.ancora.y + recuo.dy };
 
     if (a.span < vivo.span){
       const angM = a.a0 + a.s*a.span/2;            // o meio do arco novo
@@ -1474,11 +1498,12 @@ function incorpora(e){
     }
     vivo.vivo = false; vivo.episodio = e;
     for (const a of arcos.slice(1)){
-      a.episodio = e; a.des = geometriaDeNascimento(a); composicao.push(a);
+      a.episodio = e; contemNoDesenho(a);
+      a.des = geometriaDeNascimento(a); composicao.push(a);
     }
     vivo = null;
   } else {
-    for (const a of arcos){ a.episodio = e; composicao.push(a); }
+    for (const a of arcos){ a.episodio = e; contemNoDesenho(a); composicao.push(a); }
     heranca = null;
   }
   if (e) e.arcos = Math.max(arcos.length, vivo ? 0 : (e.aceito ? 1 : 0));
@@ -1561,7 +1586,7 @@ function observa(leituras, agora, escalaBruta){
     if (!fonteBola || !fonteBola.length)
       fonteBola = buf.find(b => b && b.length) || null;
     if (fonteBola && fonteBola.length)
-      bola = paraOPalco(fonteBola[fonteBola.length-1]);
+      bola = foraDoDesenho(fonteBola[fonteBola.length-1]);
   }
   vAgora = buf.map(b => velocidade(b, agora));
   vAgora.forEach((v, i) => { const pp = saude.porPonto[i]; if (pp) pp.vPico = Math.max(pp.vPico, v); });
@@ -1817,6 +1842,98 @@ const corDoEpisodio = e => {
    então se junta aos outros. Nada é inventado para a animação — os dois extremos
    já existiam, guardados em baseOx/baseOy e baseStart/baseExtent. */
 const pontaInicial = g => ({ x: g.ox + Math.cos(g.a0)*g.r, y: g.oy + Math.sin(g.a0)*g.r });
+
+/* Puxa o arco para dentro do disco do desenho, por TRANSLAÇÃO: forma, raio,
+   extensão e orientação intactos, só a posição cede. Devolve o quanto andou,
+   para a âncora andar junto e o traço continuar crescendo de onde nasceu. */
+function contemNoDesenho(a){
+  const cx = W/2, cy = H/2;
+  let pior = 0, px = 0, py = 0;
+  for (const q of pontosDoArco(a, 32)){
+    const d = Math.hypot(q.x-cx, q.y-cy);
+    if (d > pior){ pior = d; px = q.x; py = q.y; }
+  }
+  if (pior <= DESENHO_RAIO) return { dx:0, dy:0 };
+  const e = Math.hypot(px-cx, py-cy) || 1;
+  const recuo = pior - DESENHO_RAIO;
+  const dx = -(px-cx)/e*recuo, dy = -(py-cy)/e*recuo;
+  a.ox += dx; a.oy += dy; a.baseOx += dx; a.baseOy += dy;
+  return { dx, dy };
+}
+
+/* O ponto de repouso, posto FORA do desenho: direção da mão, distância ditada
+   pelo alcance da composição. */
+/* O raio em que o ponto fica livre da tinta numa dada direção. Separado de
+   propósito: é chamado tanto para o ALVO (direção da mão) quanto, a cada quadro,
+   para a posição DESENHADA — e é essa segunda chamada que transforma "o alvo
+   está fora" em "o ponto está fora", sempre. Sem ela, a bola chega ao alvo com o
+   atraso da inércia e o desenho cresce por cima dela no caminho: medido, ela
+   raspava a 0,2px de um arco. */
+function raioLivreEm(ux, uy, tinta, livre, teto){
+  let r = 0;
+  for (const q of tinta){
+    const proj = (q.x-W/2)*ux + (q.y-H/2)*uy;
+    if (proj <= 0) continue;
+    if (Math.abs((q.x-W/2)*(-uy) + (q.y-H/2)*ux) > livre) continue;   // fora do caminho
+    r = Math.max(r, proj);
+  }
+  return Math.min(teto, (r > 0 ? r : PALCO_RAIO) + livre);
+}
+
+function tintaDoDesenho(){
+  const t = [];
+  for (const a of composicao) for (const q of pontosDoArco(desenhoDe(a), 28)) t.push(q);
+  return t;
+}
+const folgaDaBola = esp => esp/2 + esp*BOLA_RAIO + esp*BOLA_FOLGA;
+const tetoDaBola  = esp => VIEW_MIN/2 - esp*BOLA_RAIO - VIEW_MIN*BOLA_MARGEM;
+
+function foraDoDesenho(mao){
+  const cx = W/2, cy = H/2;
+  const esp = espessuraDe(composicao);
+  const raioB = esp*BOLA_RAIO;
+  const teto = tetoDaBola(esp);
+
+  /* a direção é da mão; se ela estiver no centro, guarda a última */
+  let dx = mao.x - cx, dy = mao.y - cy;
+  let d = Math.hypot(dx, dy);
+  if (d < 1e-6 && bola){ dx = bola.x - cx; dy = bola.y - cy; d = Math.hypot(dx, dy); }
+  if (d < 1e-6){ dx = 0; dy = -1; d = 1; }
+  const ux = dx/d, uy = dy/d;
+
+  /* A DISTÂNCIA é ditada pela TINTA, não pelo alcance do desenho. "Fora do
+     círculo que contém tudo" não funciona: numa composição real o desenho chega
+     a 341px num quadro cuja metade é 360, e não sobra órbita — o ponto era
+     empurrado para a borda e mesmo assim ficava por dentro.
+     O que a cliente quer é o ponto não se misturar com os traços. Então o
+     critério é a tinta NAQUELA DIREÇÃO: anda pelo raio, acha o ponto mais
+     distante onde ainda há traço, e para logo depois dele. Onde o desenho é
+     denso o ponto vai longe; onde é vazio ele fica perto, e continua isolado. */
+  const tinta = tintaDoDesenho();
+  const livre = folgaDaBola(esp);
+  const alcanceEm = (vx, vy) => raioLivreEm(vx, vy, tinta, livre, Infinity) - livre;
+
+  /* A DIREÇÃO PODE CEDER. Numa composição real o desenho chega a 341px num
+     quadro cuja metade útil é 322: em algumas direções não existe "fora", e
+     insistir na direção da mão punha o ponto em cima de um traço. Então procura
+     a direção mais PRÓXIMA da mão em que ele caiba — no máximo um quarto de
+     volta para cada lado. A mão continua mandando; ela só deixa de mandar
+     sozinha quando o desenho não deixa espaço. */
+  const ang0 = Math.atan2(uy, ux);
+  let melhor = null;
+  for (let passo = 0; passo <= 30; passo++){
+    for (const lado of (passo === 0 ? [0] : [1, -1])){
+      const ang = ang0 + lado*passo*(3*Math.PI/180);
+      const vx = Math.cos(ang), vy = Math.sin(ang);
+      const r = alcanceEm(vx, vy);
+      const folgaSobra = teto - (r + livre);
+      if (folgaSobra >= 0) return { x: cx + vx*(r + livre), y: cy + vy*(r + livre) };
+      if (!melhor || folgaSobra > melhor.f) melhor = { f:folgaSobra, vx, vy, r };
+    }
+  }
+  /* nenhuma direção comporta: fica na menos apertada, no limite da cena */
+  return { x: cx + melhor.vx*teto, y: cy + melhor.vy*teto };
+}
 const geometriaDeNascimento = a => ({
   ox:a.baseOx, oy:a.baseOy, r:a.r, a0:a.baseStart, s:a.s, span:a.baseExtent });
 
@@ -1866,6 +1983,28 @@ function assenta(){
    plano o requestAnimationFrame cai para ~1 quadro por segundo e a animação
    parece travada quando na verdade está correndo devagar. Devolve true quando
    chegou. */
+/* O ponto de repouso anda TODO QUADRO, esteja ou não algum arco em movimento.
+   Estava dentro de passoDeInercia, que só roda quando há arco animando — então,
+   assim que a composição assentava, a bola congelava com a posição velha e o
+   desenho crescia por cima dela. Medido: encostava a 4,4px de um arco. */
+function passoDaBola(k){
+  if (!bola) return;
+  if (!bolaDes){ bolaDes = { x:bola.x, y:bola.y }; return; }
+  const cx = W/2, cy = H/2;
+  const aAlvo = Math.atan2(bola.y-cy, bola.x-cx);
+  let aDes = Math.atan2(bolaDes.y-cy, bolaDes.x-cx);
+  aDes += encurta(aAlvo - aDes)*k;             // só o ÂNGULO persegue
+  /* o RAIO não persegue: é recalculado na direção desenhada, todo quadro. É o
+     que garante que o ponto esteja fora da tinta AGORA, e não só quando
+     alcançar o alvo. */
+  const esp = espessuraDe(composicao);
+  const rDes = composicao.length
+    ? raioLivreEm(Math.cos(aDes), Math.sin(aDes), tintaDoDesenho(), folgaDaBola(esp), tetoDaBola(esp))
+    : Math.hypot(bola.x-cx, bola.y-cy);
+  bolaDes.x = cx + Math.cos(aDes)*rDes;
+  bolaDes.y = cy + Math.sin(aDes)*rDes;
+}
+
 function passoDeInercia(dt = 16.7){
   const k = 1 - Math.exp(-Math.max(1, Math.min(100, dt))/INERCIA_TAU);
   const teto = espessuraDe(composicao)*INERCIA_TETO*dt/1000;
@@ -1914,11 +2053,7 @@ function passoDeInercia(dt = 16.7){
     g.ox += dx; g.oy += dy; g.r += dr; g.span += dsp; g.a0 += da;
     g.s = a.s;
   }
-  if (bola){
-    if (!bolaDes) bolaDes = { x:bola.x, y:bola.y };
-    bolaDes.x += (bola.x - bolaDes.x)*k;
-    bolaDes.y += (bola.y - bolaDes.y)*k;
-  }
+  passoDaBola(k);
   if (molduraDes){
     let dk = (moldura.k - molduraDes.k)*k;
     let ddx = (moldura.dx - molduraDes.dx)*k, ddy = (moldura.dy - molduraDes.dy)*k;
@@ -2495,7 +2630,9 @@ function laco(){
     processaQuadro(leituraAtual, agora, escalaAtual);
     /* durante a captura quem toca a inércia é este laço, que já roda todo quadro.
        Um segundo rAF só para animar pintaria a mesma cena duas vezes. */
-    if (ANIMA && composicao.some(a => a.des)) passoDeInercia(agora - (ultimoQuadro || agora - 16.7));
+    const dtq = agora - (ultimoQuadro || agora - 16.7);
+    if (ANIMA && composicao.some(a => a.des)) passoDeInercia(dtq);
+    else if (ANIMA) passoDaBola(1 - Math.exp(-Math.max(1, Math.min(100, dtq))/INERCIA_TAU));
     ultimoQuadro = agora;
     pinta();
     talvezDiag(agora);
@@ -2697,6 +2834,7 @@ window.PLC = {
       ultimoQuadro = t;
       processaQuadro(leituras, t, escala);
       if (ANIMA && composicao.some(a => a.des)) passoDeInercia(dt);
+      else if (ANIMA) passoDaBola(1 - Math.exp(-Math.max(1, Math.min(100, dt))/INERCIA_TAU));
       pinta();
     },
     encerra(t){ encerra(t); },
@@ -2713,7 +2851,7 @@ window.PLC = {
        CONTAGEM_MS, CAPTURA_MS, W, H, VIEW_MIN,
        R_BASE, R_FAIXA, WIDTH_RATIO, MEDIAN_EXTENT, JOINT_OVERSHOOT, CROSSING_ANGLE, MAX_ARCOS,
        VIRADA_MS, VIRADA_RET, VIRADA_PISO, VIRADA_VOLTA, VIRADA_IDAS,
-       PALCO_RAIO, TRACO_MS, BOLA_RAIO, PERDA_MS,
+       PALCO_RAIO, TRACO_MS, BOLA_RAIO, BOLA_FOLGA, BOLA_MARGEM, DESENHO_RAIO, PERDA_MS,
        get VIRADA_MIN(){return VIRADA_MIN()}, get VIRADA_EXC(){return VIRADA_EXC()},
        COESAO_LIGADA, COESAO_PUXA, COESAO_MORDIDA, COESAO_CONTATO, DEV_OK, GANHO_MIN,
        VIVO_AMOSTRAS,
