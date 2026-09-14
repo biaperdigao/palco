@@ -427,6 +427,7 @@ const R_ARCO_MAX = 0.32 * VIEW_MIN;      // §5.5 — 230px
    entre 0,15 e 0,55 de viewMin cobrem o que as sessões reais produziram
    (189 a 284px num viewMin de 720 = 0,26 a 0,39). */
 const NORM_LO = 0.15, NORM_HI = 0.55;
+
 const DEV_OK  = 0.10;     // desvio relativo bom o bastante por trecho
 /* Partir só paga se partir MELHORA MUITO. Sem isto, um gesto de passada única com
    desvio de 8,5% contra um corte de 8% virava três arquinhos — que é o "carimbo
@@ -450,6 +451,18 @@ function arcoDeTrecho(p){
   /* o raio do gesto entra na escala da fonte (§5.5), mas quem escolhe dentro da
      faixa é a geometria medida — não um sorteio */
   const norm = clamp01((f.r/VIEW_MIN - NORM_LO)/(NORM_HI - NORM_LO));
+  /* NOTA DE MEDIÇÃO, para não ser refeita. A faixa de 144–230px é estreita
+     (1,6×), e a direção da marca registra como pendência aberta que "os raios
+     dos arcos estão parecidos demais entre si, faltando o contraste dramático".
+     Tentei alargar para 144–446 com saturação por tanh. NÃO FUNCIONA: o
+     contraste vai de 1,5× para só 1,9× e a caixa do desenho passa de 498×615
+     para 893×1003, sangrando muito mais.
+     O problema não é o teto, é a SATURAÇÃO. Acima de NORM_HI (0,55 de viewMin)
+     todo gesto vira o MESMO raio: numa composição real, quatro gestos de raio
+     650, 793, 978 e 1560 saíram como 221, 221, 221 e 226. Alargar a faixa só
+     muda o valor em que todos empatam. Quem quiser o contraste da marca tem de
+     mexer em outra coisa — provavelmente no que uma quase-reta deve virar, que
+     é decisão de desenho, não de escala. */
   const R = RAIO_DO_GESTO ? f.r : R_ARCO_MIN + norm*(R_ARCO_MAX - R_ARCO_MIN);
 
   /* "cada arco fica na posição espacial onde aquele trecho do gesto aconteceu":
@@ -1329,6 +1342,9 @@ function atualizaVivo(){
                rGesto:heranca.r, devGesto:0, nPts:ativo.pts.length,
                spanBruto:span, spanPreso:null, herdado:true,
                vivo:true, cruz:[], trecho:reamostra(ativo.pts) };
+      /* a âncora do arco herdado é o ponto exato onde o anterior parou — é o que
+         dá continuidade à corrente, e ela já é fixa por construção. */
+      vivo.ancora = pontaInicial(vivo);
       vivo.des = geometriaDeNascimento(vivo);
       composicao.push(vivo);
     }
@@ -1362,6 +1378,10 @@ function atualizaVivo(){
   if (!vivo){
     vivo = a;
     vivo.vivo = true; vivo.cruz = [];              // não participa das juntas
+    /* A ÂNCORA: onde o traço começa. Fixada no nascimento e nunca mais mexida.
+       É o que faz o arco crescer a partir de onde nasceu, como uma caneta, em
+       vez de escorregar enquanto é desenhado. */
+    vivo.ancora = pontaInicial(vivo);
     vivo.des = geometriaDeNascimento(vivo);        // nasce no lugar e passa a seguir
     composicao.push(vivo);
   } else {
@@ -1376,6 +1396,21 @@ function atualizaVivo(){
        novo é ignorado inteiro — a mão inverteu, e quem trata disso é a virada,
        que fecha o episódio e começa outro. */
     if (a.s !== vivo.s) return;
+    /* O ARCO CRESCE A PARTIR DA ÂNCORA, não em volta do meio do trecho.
+       arcoDeTrecho ancora no ponto médio, e a §5.5 diz que o ponto médio fica
+       parado — o que é verdade para um trecho PRONTO. Num trecho que ainda
+       cresce, o meio é justamente o ponto que mais anda: a cada amostra nova ele
+       caminha para a frente e leva o arco junto. Medido num gesto só, o começo
+       do traço desenhado andou 112px, 18 espessuras. Era isso que a cliente via:
+       "o traço não é traçado no lugar onde ele deve ficar pra sempre, e sim fora
+       e depois levado pro meio".
+       O ajuste novo é TRANSLADADO para que seu começo caia na âncora. Translação
+       pura: forma, raio, extensão, sentido e orientação continuam sendo os que o
+       ajuste mediu. O que deixa de acontecer é o escorregão. */
+    const ini = pontaInicial(a);
+    const dx = vivo.ancora.x - ini.x, dy = vivo.ancora.y - ini.y;
+    a.ox += dx; a.oy += dy; a.baseOx += dx; a.baseOy += dy;
+
     if (a.span < vivo.span){
       const angM = a.a0 + a.s*a.span/2;            // o meio do arco novo
       a.span = vivo.span;
@@ -1781,6 +1816,7 @@ const corDoEpisodio = e => {
    antes da coesão e antes das juntas: o arco aparece onde o gesto o pôs e só
    então se junta aos outros. Nada é inventado para a animação — os dois extremos
    já existiam, guardados em baseOx/baseOy e baseStart/baseExtent. */
+const pontaInicial = g => ({ x: g.ox + Math.cos(g.a0)*g.r, y: g.oy + Math.sin(g.a0)*g.r });
 const geometriaDeNascimento = a => ({
   ox:a.baseOx, oy:a.baseOy, r:a.r, a0:a.baseStart, s:a.s, span:a.baseExtent });
 
