@@ -2234,8 +2234,12 @@ function registraMovimento(){
       }
       a.andouMax = Math.max(a.andouMax || 0, pior);
       a.andouTotal = (a.andouTotal || 0) + pior;
-      if (a.vivo) a.andouVivo = Math.max(a.andouVivo || 0, pior);
-      else        a.andouDepois = Math.max(a.andouDepois || 0, pior);
+      /* três momentos, não dois. "No fechamento" é a regra das juntas dando ao
+         arco a sua junta — faz parte de ficar pronto. "Depois" é o desenho
+         mudando sozinho, e esse tem de ser zero. */
+      if (a.vivo)            a.andouVivo = Math.max(a.andouVivo || 0, pior);
+      else if (!a._fechou){  a.andouFecho = Math.max(a.andouFecho || 0, pior); a._fechou = true; }
+      else                   a.andouDepois = Math.max(a.andouDepois || 0, pior);
     }
     a._ant = pts;
   }
@@ -2413,8 +2417,8 @@ function pintaDiag(){
     (composicao.length ? (() => {
       const esp = espessuraDe(composicao);
       return " · andou " + composicao.map(a =>
-        `${((a.andouVivo||0)/esp).toFixed(1)}/${((a.andouDepois||0)/esp).toFixed(1)}`
-      ).join(" ") + " esp (vivo/depois)";
+        `${((a.andouVivo||0)/esp).toFixed(1)}/${((a.andouFecho||0)/esp).toFixed(1)}/${((a.andouDepois||0)/esp).toFixed(1)}`
+      ).join(" ") + " esp (vivo/fecho/depois)";
     })() : "") +
     (composicao.length ? (() => {
       const esp = espessuraDe(composicao);
