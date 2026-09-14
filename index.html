@@ -225,6 +225,57 @@ const MEM_MS     = 600;   // memória do buffer de cada ponto monitorado
 const COMP_MIN   = 110;   // px de percurso — gesto curto demais não vira traço
 const RETRO      = 2;     // amostras de recuo ao abrir, para não começar atrasado
 
+/* --- O PALCO (§5.2, revista) ---
+   A §5.2 manda cada arco ficar "na posição espacial onde aquele trecho do gesto
+   aconteceu". Na prática isso espalha o desenho pelos quatro cantos: o braço
+   varre a tela inteira, e os arcos vão junto. A cliente pediu o contrário, e o
+   pedido resolve mais de uma coisa ao mesmo tempo:
+   "não precisa seguir exatamente onde está a mão (isso vai ser bom pro celular),
+    mas eu quero que ele fique dentro de uma área mais restrita, sempre no meio.
+    Ele já é criado no lugar que ele vai ficar. Não precisa ser fiel à realidade,
+    queremos abstrair o gesto."
+
+   O palco é um disco no centro da cena. Todo arco é ancorado DENTRO dele, por uma
+   compressão que satura: perto do centro quase não mexe, longe encosta no limite
+   sem nunca passar. A direção do gesto em relação ao centro é preservada — quem
+   gesticula à esquerda tem o traço à esquerda — mas a distância deixa de ser
+   fiel, que é exatamente a abstração pedida.
+
+   Três coisas vêm de graça: os arcos passam a se cruzar sozinhos (era o que a
+   coesão fazia empurrando depois), o desenho cabe no quadro sem enquadramento, e
+   nada desliza, porque o arco nasce já no lugar onde vai ficar. */
+const PALCO_RAIO = 0.12 * VIEW_MIN;
+function paraOPalco(q){
+  const cx = W/2, cy = H/2;
+  const dx = q.x - cx, dy = q.y - cy, d = Math.hypot(dx, dy);
+  if (d < 1e-6) return { x:cx, y:cy };
+  const k = PALCO_RAIO*Math.tanh(d/PALCO_RAIO)/d;
+  return { x: cx + dx*k, y: cy + dy*k };
+}
+
+/* --- TEMPO MÁXIMO DE UM TRAÇO ---
+   "Vamos delimitar um tempo do traço: ele ficou pronto e fica parado. A cada
+    0,5s o gesto deve ser finalizado independente dele realmente ser finalizado.
+    A ideia de corrente mesmo, mas algumas vezes ela não funciona."
+   Tem razão, e o diagnóstico mostra onde ela não funciona: um episódio fechou
+   com volta 3,6 — a mão andou 3,6 vezes o comprimento do arco dentro dele. O
+   corte por span só conta ângulo COM SINAL, então vaivém não o faz crescer, e a
+   virada nem sempre pega. Um teto de tempo não depende de reconhecer nada: o
+   traço tem meio segundo de vida, e depois disso está pronto por decreto. */
+const TRACO_MS = 500;
+
+/* --- A BOLA — o ponto de repouso ---
+   A §1 diz que o rastro cru da mão nunca aparece, "nem ponto, nem bolinha". Esta
+   é uma exceção decidida pela cliente, e ela tem fundamento na própria direção
+   da marca: o símbolo tem um ponto sólido à parte, que é o "ponto de repouso" de
+   Kandinsky — o pé que ainda toca o chão enquanto o resto do corpo está em
+   tensão. A mão É o ponto em movimento; quando ela para, vira repouso.
+   O motivo da regra da §1 era outro: DOIS REGISTROS SIMULTÂNEOS da mesma coisa,
+   a fila de pontos crus competindo com o arco abstraído. Um ponto único não é
+   uma fila. Ele também não se funde com os arcos — fica isolado à parte, como no
+   esboço do símbolo. */
+const BOLA_RAIO = 2.6;      // em espessuras de traço
+
 /* --- a fronteira por VIRADA (§5.1, estendida) ---
    A §5.1 fecha o episódio de um jeito só: 200ms abaixo de V_PAUSA. Numa sequência
    de gestos encadeados a mão NUNCA para 200ms — ela inverte e emenda — e os
@@ -385,9 +436,13 @@ function arcoDeTrecho(p){
      o ponto médio do trecho fica PARADO, e o centro desliza ao longo do raio que
      já passava por ele. Mudar o raio sem isso arrastaria o arco para longe do
      movimento — que é o que "rearranjado em torno de um centro comum" descreve. */
-  const M = p[Math.floor(p.length/2)];
-  const d = Math.hypot(f.cx - M.x, f.cy - M.y) || 1;
-  const u = { x:(f.cx - M.x)/d, y:(f.cy - M.y)/d };
+  /* o ponto médio do trecho é levado para DENTRO DO PALCO antes de qualquer
+     outra conta. Tudo o mais — direção, sentido, extensão, para que lado a curva
+     abre — continua saindo do gesto; só a distância ao centro é comprimida. */
+  const M = paraOPalco(p[Math.floor(p.length/2)]);
+  const Mg = p[Math.floor(p.length/2)];
+  const d = Math.hypot(f.cx - Mg.x, f.cy - Mg.y) || 1;
+  const u = { x:(f.cx - Mg.x)/d, y:(f.cy - Mg.y)/d };
   const c = { x: M.x + u.x*R, y: M.y + u.y*R };
   const angM = Math.atan2(M.y - c.y, M.x - c.x);
   const a0 = angM - s*ext/2;               // o arco fica centrado sobre o gesto
@@ -1209,6 +1264,11 @@ function refazPassadas(){
    durante o gesto e o span pula 59,7° num quadro. Um arco que se parte na frente
    da pessoa é a "substituição" da §6. Partir no assentamento é uma batida
    natural — a mesma em que o arco para de seguir. */
+/* a bola, em coordenadas de palco: onde a mão está, comprimida para dentro do
+   disco central junto com tudo o mais. Persegue com a mesma inércia dos arcos,
+   para não tremer com o rastreador. */
+let bola = null, bolaDes = null;
+
 let vivo = null;
 /* O CÍRCULO DO ARCO QUE ACABOU DE ENCHER, para o seguinte continuar nele.
    Sem isto, cada corte da corrente custa ~190ms sem traço nenhum: o episódio
@@ -1429,6 +1489,15 @@ function observa(leituras, agora, escalaBruta){
     if (!visto.has(i)) buf[i].length = 0;                 // sumiu do quadro: esquece
     while (buf[i].length && agora - buf[i][0].t > MEM_MS) buf[i].shift();
   }
+  /* a bola segue o ponto ATIVO; sem nenhum ativo, o último ponto que foi visto.
+     Exclusividade vale para ela também: uma mão de cada vez. */
+  {
+    let fonteBola = ativo ? buf[ativo.ponto] : null;
+    if (!fonteBola || !fonteBola.length)
+      fonteBola = buf.find(b => b && b.length) || null;
+    if (fonteBola && fonteBola.length)
+      bola = paraOPalco(fonteBola[fonteBola.length-1]);
+  }
   vAgora = buf.map(b => velocidade(b, agora));
   vAgora.forEach((v, i) => { const pp = saude.porPonto[i]; if (pp) pp.vPico = Math.max(pp.vPico, v); });
   return aceitas.length;
@@ -1509,6 +1578,16 @@ function processaQuadro(leituras, agora, escalaBruta){
   if (CORRENTE && vivo && (vivo.spanBruto || 0) >= MEDIAN_EXTENT){
     fixa(agora, "arco cheio", agora);
     b.splice(0, Math.max(0, b.length - 3));   // recomeça daqui, com um fio de recuo
+    return;
+  }
+
+  /* 4c · e o teto de TEMPO, que não depende de reconhecer nada. O corte por span
+     conta ângulo com sinal: um vaivém não o faz crescer, e o episódio engorda sem
+     nunca encher — medido, volta 3,6 num episódio só. Meio segundo é meio
+     segundo. */
+  if (agora - ativo.t0 >= TRACO_MS){
+    fixa(agora, "arco cheio", agora);        // mesmo tratamento: herda e continua
+    b.splice(0, Math.max(0, b.length - 3));
     return;
   }
 
@@ -1641,7 +1720,12 @@ function fugaDoArco(a){
   const t = a.trecho;
   if (!t || t.length < 2) return null;
   const g = desenhoDe(a), pts = pontosDoArco(g, 64);
-  const ds = t.map(q => {
+  /* contra o gesto JÁ LEVADO PARA O PALCO, não contra a posição crua na tela.
+     Desde que o desenho passou a ser abstraído de propósito — a distância ao
+     centro deixou de ser fiel —, medir contra a posição crua marcaria como erro
+     justamente o que foi pedido. O que continua valendo perguntar é: dentro da
+     abstração, o arco representa o movimento? */
+  const ds = t.map(paraOPalco).map(q => {
     let d = Infinity;
     for (const u of pts) d = Math.min(d, (q.x-u.x)*(q.x-u.x) + (q.y-u.y)*(q.y-u.y));
     return Math.sqrt(d);
@@ -1764,6 +1848,11 @@ function passoDeInercia(dt = 16.7){
     g.ox += dx; g.oy += dy; g.r += dr; g.span += dsp; g.a0 += da;
     g.s = a.s;
   }
+  if (bola){
+    if (!bolaDes) bolaDes = { x:bola.x, y:bola.y };
+    bolaDes.x += (bola.x - bolaDes.x)*k;
+    bolaDes.y += (bola.y - bolaDes.y)*k;
+  }
   if (molduraDes){
     let dk = (moldura.k - molduraDes.k)*k;
     let ddx = (moldura.dx - molduraDes.dx)*k, ddy = (moldura.dy - molduraDes.dy)*k;
@@ -1793,6 +1882,22 @@ function animaComposicao(){
 
 /* UMA tinta, UMA espessura, alfa cheio. Nenhum arco é "passado": o resultado tem
    de ler como uma imagem só. Terminal semicircular = lineCap round (§4). */
+/* O ponto de repouso. FORA do filtro gooey de propósito: no esboço do símbolo
+   ele é um ponto sólido ISOLADO à parte, não um nó fundido nos arcos. */
+function pintaBola(esp, q, alfa){
+  const b = bolaDes || bola;
+  if (!b) return;
+  ctx.save();
+  ctx.setTransform(q.k, 0, 0, q.k, q.dx, q.dy);
+  ctx.globalAlpha = alfa;
+  ctx.fillStyle = "#FFFFFF";
+  /* o raio é em espessuras DE TELA, então dividido pela escala do enquadramento
+     — a bola não muda de tamanho quando a composição muda de escala. */
+  ctx.beginPath(); ctx.arc(b.x, b.y, esp*BOLA_RAIO/q.k, 0, 7); ctx.fill();
+  ctx.restore();
+  ctx.setTransform(1,0,0,1,0,0);
+}
+
 function pintaComposicao(alfa = 1){
   if (!composicao.length) return;
   /* a espessura sai do raio, e a coesão e as juntas nunca mexem em raio: ela é a
@@ -1807,6 +1912,7 @@ function pintaComposicao(alfa = 1){
     ctx.globalAlpha = alfa;
     for (const a of composicao) tracaArco(a);
     ctx.setTransform(1,0,0,1,0,0);
+    pintaBola(esp, q, alfa);
     return;
   }
 
@@ -1858,6 +1964,8 @@ function pintaComposicao(alfa = 1){
   ctx.globalAlpha = alfa;
   ctx.drawImage(off2, 0, 0);
   ctx.restore();
+
+  pintaBola(esp, q, alfa);
 }
 
 function pinta(){
@@ -2121,7 +2229,8 @@ function pintaDiag(){
           <td class="${a.devGesto<0.10?'passa':'morre'}">${(a.devGesto*100).toFixed(1)}%</td>
           <td>${a.nPts}</td></tr>`; }).join("")}
         </table>
-        <p><b>FUGA</b> é a distância de cada ponto do trecho de gesto até o arco desenhado — a
+        <p><b>FUGA</b> é a distância de cada ponto do trecho de gesto — já levado para o
+           palco, porque a abstração é intencional — até o arco desenhado. É a
            única medida aqui que compara o TRAÇO com o MOVIMENTO. Todas as outras comparam o
            gesto com o círculo ajustado, e um gesto pode caber perfeitamente num círculo e mesmo
            assim virar um traço longe dele: entre o ajuste e o desenho, a §5.5 troca o raio medido
@@ -2339,6 +2448,7 @@ function zera(){
   limpaBuffers();
   ativo = null; fase = "procurando"; assentaAte = 0;
   episodios = []; composicao = []; coesao = null; retomada = -1; vivo = null; heranca = null;
+  bola = null; bolaDes = null;
   if (animando){ cancelAnimationFrame(animando); animando = 0; }
   ultimoQuadro = 0;
   moldura = {k:1, dx:0, dy:0}; molduraDes = null;
@@ -2501,7 +2611,8 @@ window.PLC = {
   get episodios(){return episodios}, get ativo(){return ativo}, get fase(){return fase},
   get buf(){return buf}, get silenciados(){return silenciados}, get saude(){return saude},
   get fonte(){return fonte}, get composicao(){return composicao}, get moldura(){return moldura},
-  get coesao(){return coesao}, get vivo(){return vivo}, aproxima, viradaEm, folgaEntre, cruzamentosDe,
+  get coesao(){return coesao}, get vivo(){return vivo}, get bola(){return bolaDes||bola},
+  paraOPalco, aproxima, viradaEm, folgaEntre, cruzamentosDe,
   get molduraDes(){return molduraDes}, animaComposicao, semeiaDesenho, erroDoDesenho, desenhoDe,
   passoDeInercia, fugaDoArco, corDoEpisodio, paraOndeEsta,
   reduzAArcos, arcoDeTrecho, circulo, spanDe, reamostra, pontosDoArco, espessuraDe, enquadra,
@@ -2534,6 +2645,7 @@ window.PLC = {
        CONTAGEM_MS, CAPTURA_MS, W, H, VIEW_MIN,
        R_BASE, R_FAIXA, WIDTH_RATIO, MEDIAN_EXTENT, JOINT_OVERSHOOT, CROSSING_ANGLE, MAX_ARCOS,
        VIRADA_MS, VIRADA_RET, VIRADA_PISO, VIRADA_VOLTA, VIRADA_IDAS,
+       PALCO_RAIO, TRACO_MS, BOLA_RAIO,
        get VIRADA_MIN(){return VIRADA_MIN()}, get VIRADA_EXC(){return VIRADA_EXC()},
        COESAO_LIGADA, COESAO_PUXA, COESAO_MORDIDA, COESAO_CONTATO, DEV_OK, GANHO_MIN,
        VIVO_AMOSTRAS,
