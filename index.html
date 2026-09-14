@@ -285,6 +285,17 @@ const TRACO_MS = (() => {
    esboço do símbolo. */
 const BOLA_RAIO = 2.6;      // em espessuras de traço
 
+/* --- CARÊNCIA DE PERDA ---
+   O rastreador PISCA. Numa captura real de 208 quadros, o MediaPipe não achou a
+   mão em 42 deles — 20% — com a mão a 4148px/s de pico: é borrão de movimento,
+   não mão fora do quadro. Até aqui, o primeiro quadro sem leitura apagava o
+   buffer do ponto e matava o episódio na hora ("ponto perdido"), dois deles
+   naquela captura. Mas a mão não foi a lugar nenhum em 24ms.
+   A carência separa "o detector piscou" de "a mão saiu": o buffer sobrevive, e o
+   episódio só morre se a ausência PERSISTIR. É a mesma lógica do SALTO_SEGUIDOS,
+   que já distingue erro do rastreador de realocação de verdade. */
+const PERDA_MS = 160;
+
 /* --- a fronteira por VIRADA (§5.1, estendida) ---
    A §5.1 fecha o episódio de um jeito só: 200ms abaixo de V_PAUSA. Numa sequência
    de gestos encadeados a mão NUNCA para 200ms — ela inverte e emenda — e os
@@ -944,6 +955,7 @@ let composicao = [];          // os arcos do resultado (etapa 2)
 let coesao = null;            // relato da passada de coesão (etapa 5)
 let moldura = {k:1, dx:0, dy:0};      // o enquadramento ALVO
 let molduraDes = null;                // o desenhado, quando a inércia está em curso
+let perdaDesde = [];          // quando cada ponto sumiu do quadro (0 = está lá)
 let silenciados = [];
 let vAgora = [];              // velocidade por ponto, para o HUD
 let leituraAtual = [], cruAtual = null, escalaAtual = null;
@@ -984,7 +996,9 @@ const saude = { quadros:0, comPose:0, comLeitura:0, semLeitura:0, erros:0, ultim
    foi lento demais" — três causas que, juntas, viram um silêncio só. */
 function zeraPontos(){
   saude.porPonto = MONITORADOS().map(() => ({ visto:0, recusadoVis:0, vPico:0, visMax:0,
-                                              salto:0, saltoSeq:0, vBruto:0, vs:[] }));
+                                              salto:0, saltoSeq:0, vBruto:0, vs:[],
+                                              piscadas:0, perdas:0 }));
+  perdaDesde = MONITORADOS().map(() => 0);
 }
 
 function limpaBuffers(){ buf = MONITORADOS().map(() => []); }
@@ -1495,7 +1509,14 @@ function observa(leituras, agora, escalaBruta){
     b.push({ x, y, t:agora });
   });
   for (let i=0; i<buf.length; i++){
-    if (!visto.has(i)) buf[i].length = 0;                 // sumiu do quadro: esquece
+    if (!visto.has(i)){
+      if (!perdaDesde[i]){ perdaDesde[i] = agora; const pp = saude.porPonto[i]; if (pp) pp.piscadas++; }
+      if (agora - perdaDesde[i] > PERDA_MS){
+        buf[i].length = 0;                                // sumiu de verdade: esquece
+        if (perdaDesde[i] > 0) saude.porPonto[i] && saude.porPonto[i].perdas++;
+        perdaDesde[i] = -1;                               // já contabilizada
+      }
+    } else perdaDesde[i] = 0;
     while (buf[i].length && agora - buf[i][0].t > MEM_MS) buf[i].shift();
   }
   /* a bola segue o ponto ATIVO; sem nenhum ativo, o último ponto que foi visto.
@@ -2131,7 +2152,8 @@ function pintaDiag(){
       return `${f.nome}: pico ${num(pp.vPico)}/${num(pp.vBruto)} ` +
              `p10 ${num(pct(pp.vs,0.10))} p25 ${num(pct(pp.vs,0.25))} p50 ${num(pct(pp.vs,0.5))} ` +
              `p90 ${num(pct(pp.vs,0.9))} p99 ${num(pct(pp.vs,0.99))} ` +
-             `saltos ${pp.salto||0} vis ${(pp.visMax||0).toFixed(2)} visto ${pp.visto||0}`;
+             `saltos ${pp.salto||0} piscadas ${pp.piscadas||0}/${pp.perdas||0}perdeu ` +
+             `vis ${(pp.visMax||0).toFixed(2)} visto ${pp.visto||0}`;
     }).join(" · ") +
     ` · episodios ${episodios.length} (${aceitos} aceitos)` +
     (episodios.length ? ": " + episodios.map(e =>
@@ -2462,6 +2484,7 @@ function zera(){
   ultimoQuadro = 0;
   moldura = {k:1, dx:0, dy:0}; molduraDes = null;
   silenciados = MONITORADOS().map(() => 0);
+  perdaDesde = MONITORADOS().map(() => 0);
   vAgora = MONITORADOS().map(() => 0);
   leituraAtual = []; cruAtual = null;
   zeraPontos();
@@ -2654,7 +2677,7 @@ window.PLC = {
        CONTAGEM_MS, CAPTURA_MS, W, H, VIEW_MIN,
        R_BASE, R_FAIXA, WIDTH_RATIO, MEDIAN_EXTENT, JOINT_OVERSHOOT, CROSSING_ANGLE, MAX_ARCOS,
        VIRADA_MS, VIRADA_RET, VIRADA_PISO, VIRADA_VOLTA, VIRADA_IDAS,
-       PALCO_RAIO, TRACO_MS, BOLA_RAIO,
+       PALCO_RAIO, TRACO_MS, BOLA_RAIO, PERDA_MS,
        get VIRADA_MIN(){return VIRADA_MIN()}, get VIRADA_EXC(){return VIRADA_EXC()},
        COESAO_LIGADA, COESAO_PUXA, COESAO_MORDIDA, COESAO_CONTATO, DEV_OK, GANHO_MIN,
        VIVO_AMOSTRAS,
