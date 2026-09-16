@@ -394,6 +394,23 @@
                 0 0 1 0 0
                 0 0 0 14 -6.75"/>
     </filter>
+    <!-- O MESMO FILTRO, SÓ QUE DO CARTAZ. Não é duplicação por descuido: o
+         stdDeviation acompanha a espessura EM PIXELS do canvas, e o cartaz
+         desenha a 1080 de largura enquanto a tela desenha a 960 com outro
+         enquadramento. Um filtro só obrigaria a reescrever o atributo antes e
+         depois de exportar, e o motor guarda o último valor escrito para não
+         invalidar o cache do navegador a cada quadro — ele não veria a troca e
+         a tela ficaria com o borrão do cartaz. Dois filtros, nenhum estado
+         compartilhado. -->
+    <filter id="plc-goo-cartaz" x="-20%" y="-20%" width="140%" height="140%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="0" result="b"/>
+      <feColorMatrix in="b" type="matrix" result="g"
+        values="1 0 0 0 0
+                0 1 0 0 0
+                0 0 1 0 0
+                0 0 0 14 -6.75"/>
+    </filter>
   </defs>
 </svg>
 
@@ -4410,4 +4427,181 @@ window.PLC = {
     else { relata(); setTimeout(() => desfaz(aoManifesto), SEGURA_MS); }
   });
 })();
+</script>
+
+<!-- ===================== o cartaz =====================
+     "me conta como podemos exportar esse cartaz personalizado?" — e depois o
+     arquivo, layout/AI/plc_cartaz_6.ai, prancheta de 1080×1440. As medidas
+     abaixo NÃO foram tiradas do olho: saíram do content stream do .ai, que é
+     PDF por dentro. Baselines, corpos, tracking e a borda direita dos dois
+     blocos de endereço (as duas linhas terminam no mesmo x=1048,08, calculado
+     pela tabela de larguras da fonte do arquivo) estão aqui como números, não
+     como aproximações.
+
+     TUDO ACONTECE NO NAVEGADOR. O rodapé da peça promete que nada sai do
+     aparelho; um render no servidor quebraria a promessa por uma conveniência. -->
+<script type="module">
+const $ = id => document.getElementById(id);
+const PLC = window.PLC;
+
+const C = {
+  W:1080, H:1440,
+  fundo:"#1A1A1A", tinta:"#F4F0EE",
+  tracking:0.01,                       // Tc do arquivo, em ems
+  esq:32.62, dir:1048.08,              // margens medidas
+  /* o logotipo encosta nas duas bordas e no alto: no arquivo ele vai de
+     x=-0,4 a x=1080,4 e o topo das redondas passa 5,8 do corte. */
+  marca:{ x0:-0.4, larg:1080.8, topo:-5.8 },
+  texto:[
+    { t:"30 de setembro",    y: 378.92, px:70,      al:"esq" },
+    { t:"20h",               y: 448.92, px:70,      al:"esq" },
+    { t:"Rua Guaicurus, 27", y:1341.17, px:70,      al:"dir" },
+    { t:"Água Branca | SP",  y:1411.17, px:70,      al:"dir" },
+    { t:"Convite pessoal e intransferível", y:1411.98, px:32.1, al:"esq" },
+  ],
+  /* o campo da arte: entre a base do "20h" e o topo das maiúsculas do endereço,
+     com as margens laterais um pouco mais largas que as do texto. No arquivo
+     dela o desenho ocupa 601×796 dentro dele. */
+  arte:{ x0:60, y0:480, x1:1020, y1:1270 },
+};
+
+/* TRACKING NA MÃO, LETRA POR LETRA. ctx.letterSpacing existe, mas é recente e
+   não está em todo Safari — e é justamente o alinhamento à direita que depende
+   dele: sem o tracking a linha do endereço não termina na margem. Medir e
+   desenhar com a mesma conta faz o alinhamento fechar em qualquer navegador. */
+const larguraCom = (ctx, t, px) => {
+  let w = 0;
+  for (const ch of t) w += ctx.measureText(ch).width + C.tracking*px;
+  return w;
+};
+function escreve(ctx, t, x, y, px){
+  let cx = x;
+  for (const ch of t){ ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + C.tracking*px; }
+}
+
+async function desenhaCartaz(){
+  const cv = document.createElement("canvas");
+  cv.width = C.W; cv.height = C.H;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = C.fundo; ctx.fillRect(0, 0, C.W, C.H);
+
+  /* 1 · o logotipo, dos mesmos paths que a página já carrega. Path2D desenha o
+     vetor na escala que for: nada de rasterizar e ampliar. */
+  const svg = document.querySelector(".plc-marca svg");
+  const vb = svg.getAttribute("viewBox").split(/\s+/).map(Number);
+  const k = C.marca.larg/vb[2];
+  ctx.save();
+  ctx.setTransform(k, 0, 0, k, C.marca.x0 - vb[0]*k, C.marca.topo - vb[1]*k);
+  ctx.fillStyle = C.tinta;
+  for (const p of svg.querySelectorAll("path")) ctx.fill(new Path2D(p.getAttribute("d")));
+  ctx.restore();
+
+  /* 2 · a arte da pessoa */
+  desenhaArte(ctx);
+
+  /* 3 · os textos */
+  await document.fonts.load('300 70px "Tor Grotesk Web"');
+  ctx.fillStyle = C.tinta; ctx.textBaseline = "alphabetic";
+  for (const l of C.texto){
+    ctx.font = `300 ${l.px}px "Tor Grotesk Web", Barlow, sans-serif`;
+    const x = l.al === "esq" ? C.esq : C.dir - larguraCom(ctx, l.t, l.px);
+    escreve(ctx, l.t, x, l.y, l.px);
+  }
+  return cv;
+}
+
+function desenhaArte(ctx){
+  const comp = PLC.composicao;
+  if (!comp || !comp.length) return;
+  const esp = PLC.espessuraDe(comp);
+
+  /* a caixa do desenho, sobre a geometria DESENHADA e incluindo a bola — que o
+     enquadra() da tela não inclui, porque lá ela é empurrada para fora do
+     desenho e pode sair da caixa. Num cartaz, sair da caixa é ser cortada. */
+  let x0=1e9, y0=1e9, x1=-1e9, y1=-1e9;
+  const linhas = [];
+  for (const a of comp){
+    const g = PLC.desenhoDe(a);
+    /* UM PONTO A CADA MEIA UNIDADE DE CENA. A tela desenha o arco com arc(), que
+       é curva de verdade; aqui ele vira polilinha, e no cartaz cada unidade de
+       cena vale quase duas de papel — com a amostragem da tela os arcos saíam
+       facetados, com vértices visíveis nas voltas largas. */
+    const n = Math.max(64, Math.round(Math.abs((g.r||0)*(g.span||0))*2));
+    const p = PLC.pontosDoArco(g, n);
+    linhas.push(p);
+    for (const q of p){
+      x0=Math.min(x0,q.x); x1=Math.max(x1,q.x); y0=Math.min(y0,q.y); y1=Math.max(y1,q.y);
+    }
+  }
+  const bola = PLC.bola, rb = esp*PLC.P.BOLA_RAIO;
+  if (bola){
+    x0=Math.min(x0,bola.x-rb); x1=Math.max(x1,bola.x+rb);
+    y0=Math.min(y0,bola.y-rb); y1=Math.max(y1,bola.y+rb);
+  }
+  const m = esp/2;                      // o terminal redondo não pode ser cortado
+  x0-=m; y0-=m; x1+=m; y1+=m;
+
+  const cx = C.arte.x1-C.arte.x0, cy = C.arte.y1-C.arte.y0;
+  const kp = Math.min(cx/(x1-x0 || 1), cy/(y1-y0 || 1));
+  const dx = (C.arte.x0+C.arte.x1)/2 - (x0+x1)/2*kp;
+  const dy = (C.arte.y0+C.arte.y1)/2 - (y0+y1)/2*kp;
+  const espP = esp*kp;                  // a espessura cresce com o desenho
+
+  /* os dois buffers do gooey, na resolução do cartaz. Mesma razão da tela: com
+     ctx.filter ligado o alfa entra ANTES da filtragem, então a fusão acontece
+     num buffer com alfa 1 e o resultado é que vai para o cartaz. */
+  const b1 = document.createElement("canvas"); b1.width = C.W; b1.height = C.H;
+  const g1 = b1.getContext("2d");
+  g1.setTransform(1,0,0,1,0,0);
+  g1.strokeStyle = C.tinta; g1.fillStyle = C.tinta;
+  g1.lineWidth = espP; g1.lineCap = "round"; g1.lineJoin = "round";
+  for (const p of linhas){
+    g1.beginPath();
+    p.forEach((q,i) => { const X=q.x*kp+dx, Y=q.y*kp+dy; i ? g1.lineTo(X,Y) : g1.moveTo(X,Y); });
+    g1.stroke();
+  }
+  if (PLC.G.GOO_FILETE > 0){
+    const R = espP*PLC.G.GOO_FILETE;
+    for (const X of PLC.cruzamentosDe(comp.map(PLC.desenhoDe))){
+      g1.beginPath(); g1.arc(X.x*kp+dx, X.y*kp+dy, R, 0, 7); g1.fill();
+    }
+  }
+  if (bola){
+    g1.beginPath(); g1.arc(bola.x*kp+dx, bola.y*kp+dy, rb*kp, 0, 7); g1.fill();
+  }
+
+  if (!PLC.G.GOO_LIGADO){ ctx.drawImage(b1, 0, 0); return; }
+  document.querySelector("#plc-goo-cartaz feGaussianBlur")
+          .setAttribute("stdDeviation", String(espP*PLC.G.GOO_BLUR_RATIO));
+  const b2 = document.createElement("canvas"); b2.width = C.W; b2.height = C.H;
+  const g2 = b2.getContext("2d");
+  g2.filter = "url(#plc-goo-cartaz)";
+  g2.drawImage(b1, 0, 0);
+  ctx.drawImage(b2, 0, 0);
+}
+
+/* A ENTREGA. No iPhone um <a download> NÃO salva em Fotos: abre o arquivo numa
+   aba e a pessoa perde o cartaz. navigator.share com arquivo abre a folha de
+   compartilhamento nativa — salvar em Fotos, WhatsApp, AirDrop — que é o
+   caminho que faz o convite circular. No computador, download normal. */
+async function salvaCartaz(){
+  const cv = await desenhaCartaz();
+  const blob = await new Promise(r => cv.toBlob(r, "image/png"));
+  if (!blob) return;
+  const arq = new File([blob], "palco-convite.png", { type:"image/png" });
+  if (navigator.canShare && navigator.canShare({ files:[arq] })){
+    try { await navigator.share({ files:[arq] }); return; }
+    catch(e){ if (e && e.name === "AbortError") return; }   // a pessoa desistiu
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "palco-convite.png";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/* o motor deixa um aviso de "ainda não existe" no botão; este módulo roda depois
+   dele e assume o lugar. */
+{ const b = $("b-salvar"); if (b) b.onclick = salvaCartaz; }
+window.PLC_CARTAZ = { desenhaCartaz, salvaCartaz, C };
 </script>
