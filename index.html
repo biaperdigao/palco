@@ -125,10 +125,17 @@
   .plc-manifesto .plc-verbo{font-size:clamp(17px,2.4vw,26px); letter-spacing:.06em; margin:0 0 .5em}
   /* SEM VIÚVAS. A primeira frase quebrava em "vestir, dançar," / "viver." e
      deixava uma palavra sozinha na segunda linha. text-wrap:balance reparte as
-     linhas por igual dentro de cada segmento — e como as duas frases já são
-     separadas por <br>, cada uma se equilibra sem interferir na outra. */
-  .plc-manifesto p{margin:0; font-size:clamp(14px,1.6vw,19px); line-height:1.5;
+     linhas por igual dentro de cada bloco. */
+  .plc-manifesto p{margin:0; font-size:clamp(14px,1.6vw,19px); line-height:1.28;
                    text-wrap:balance}
+
+  /* ENTRELINHA DE FRASE E ENTRELINHA DE PARÁGRAFO SÃO COISAS DIFERENTES, e com
+     um <br> ou um \n as duas saíam iguais: a frase que quebrava em duas linhas
+     ficava tão solta quanto a passagem para a frase seguinte, e o texto perdia
+     a hierarquia. Uma frase por bloco resolve as duas de uma vez — o
+     line-height fecha as linhas de dentro, a margem abre entre os blocos. */
+  .frase{display:block}
+  .frase + .frase{margin-top:.75em}
   .plc-btns-linha{display:flex; gap:9px; justify-content:center}
   /* O CONVITE MORA DEBAIXO DO LOGOTIPO, em duas colunas com a largura DELE:
      data e hora começando no P, endereço terminando no O. É por isso que a
@@ -171,14 +178,15 @@
   .plc-conta{font-size:64px; font-weight:300; letter-spacing:-.02em; font-variant-numeric:tabular-nums}
   /* A INSTRUÇÃO SAI DO FLUXO. A camada é uma coluna centrada: um segundo filho
      empurraria o número para cima metade da linha mais o gap, e o número estava
-     onde estava por decisão dela. Absoluta, ela pousa abaixo do número sem
-     mexer em nada — o 50% é o mesmo centro da camada e os 46px são a meia-altura
-     da caixa do 64px mais um respiro.
-     E ela cede o brilho para a bolota: a bola é a mão da pessoa e é o que ela
-     precisa ver. Texto a 62% lê como instrução; a 100% competiria com a tinta. */
+     onde estava por decisão dela. Absoluta, ela pousa logo abaixo do número sem
+     mexer em nada — o 50% é o mesmo centro da camada e os 42px são a meia-altura
+     da caixa do 64px mais um fio de respiro.
+     EM CREME CHEIO, por decisão dela. Eu tinha posto a 62% para não competir
+     com a bolota; ela quer as duas com o mesmo peso — a instrução é o que a
+     pessoa tem de ler naqueles dois segundos. */
   #c-conta #t-conta{
-    position:absolute; left:0; right:0; top:calc(50% + 46px);
-    margin:0; padding:0 24px; opacity:.62;
+    position:absolute; left:0; right:0; top:calc(50% + 42px);
+    margin:0; padding:0 24px; color:var(--tinta);
   }
   .plc-relogio{position:absolute; top:12px; left:14px; z-index:4; font-size:10px; letter-spacing:.16em;
     color:var(--cinza); font-variant-numeric:tabular-nums}
@@ -302,7 +310,7 @@
      Com 28ch a quebra cai em "…conforme você" / "mexer sua mão.". A caixa mais
      estreita não aperta nenhuma das outras frases: "Afaste um pouco a mão da
      câmera." continua em duas linhas. */
-  .plc-legenda{font-size:clamp(18px,1.7vw,21px); line-height:1.6; max-width:28ch;
+  .plc-legenda{font-size:clamp(18px,1.7vw,21px); line-height:1.28; max-width:28ch;
                letter-spacing:.01em; white-space:pre-line}
   /* pre-line: a frase da calibragem vem do motor com um \n no meio, e é o motor
      que decide onde ela quebra — não a largura da caixa. */
@@ -503,7 +511,7 @@
     <div class="plc-camada" id="c-repouso" hidden>
       <div class="plc-manifesto">
         <p class="plc-verbo">VESTIR É UM VERBO</p>
-        <p>A Palco nasce do gesto de vestir, dançar, viver.<br>Seu convite é um gesto. Faça o seu.</p>
+        <p><span class="frase">A Palco nasce do gesto de vestir, dançar, viver.</span><span class="frase">Seu convite é um gesto. Faça o seu.</span></p>
       </div>
       <div class="plc-btns">
         <button class="plc-btn" id="b-camera">ligar a câmera</button>
@@ -526,7 +534,7 @@
          na passagem para "grava": some sozinha quando a gravação começa. -->
     <div class="plc-camada" id="c-conta" hidden>
       <div class="plc-conta" id="n-conta">3</div>
-      <p class="plc-legenda" id="t-conta">faça movimentos amplos e suaves</p>
+      <p class="plc-legenda" id="t-conta"><span class="frase">faça movimentos amplos e suaves</span></p>
     </div>
 
     <div class="plc-camada" id="c-erro" hidden>
@@ -1444,6 +1452,22 @@ function aproxima(arcos, esp){
   const g = new Set(); for (let i=0; i<arcos.length; i++) g.add(acha(i));
   relato.grupos = g.size;
   return relato;
+}
+
+/* UMA FRASE POR BLOCO. As legendas chegavam como um texto só com \n no meio, e
+   o pre-line resolvia a quebra mas não a ENTRELINHA: a mesma distância separava
+   duas linhas da mesma frase e duas frases diferentes. Pedido da cliente, e é
+   regra, não caso: "sempre deixar as entrelinhas de frase juntas e de parágrafo
+   separadas". Com cada frase num bloco próprio o CSS consegue dizer as duas
+   coisas — line-height apertado dentro, margem entre. */
+function legenda(el, txt){
+  if (!el) return;
+  el.textContent = "";
+  for (const f of String(txt).split("\n")){
+    const b = document.createElement("span");
+    b.className = "frase"; b.textContent = f;
+    el.appendChild(b);
+  }
 }
 
 /* ===================== fonte de leitura =====================
@@ -3475,7 +3499,7 @@ function erro(msg){ $("t-erro").textContent = msg; vai("erro"); }
 async function ligaCamera(){
   viuOsPontos = false; maoNaTela = null;
   $("b-gravar").hidden = true;
-  $("t-calibra").textContent = "Carregando…"; vai("calibra");
+  legenda($("t-calibra"), "Carregando…"); vai("calibra");
   zera();
   let fluxo;
   try{
@@ -3495,7 +3519,7 @@ async function ligaCamera(){
     saude.ultimoErro = String(e && e.message || e).slice(0, 200);
     return erro("A leitura de corpo não carregou aqui — a página precisa buscar o modelo na internet.");
   }
-  $("t-calibra").textContent = fonte.dica;
+  legenda($("t-calibra"), fonte.dica);
   laco();
 }
 function laco(){
@@ -3545,18 +3569,22 @@ function laco(){
        mão inteira no quadro: quando ela enche a tela e encosta nas bordas, ele a
        perde — e cada perda fecha um traço. Na captura da cliente a escala bateu
        no teto e 43% dos quadros voltaram vazios. É a única coisa que ela pode
-       corrigir sozinha, então a calibragem é onde tem de ser dita. */
-    $("t-calibra").textContent =
+       corrigir sozinha, então a calibragem é onde tem de ser dita.
+
+       E ela DEIXA DE SER UM RAMO. Como ramo, esta frase apagava a explicação da
+       bola enquanto durasse — quem estava perto demais nunca lia o que a bola
+       era. Agora ela entra ACIMA do texto da bola e sai quando a mão volta para
+       a distância boa, sem levar o resto junto. */
+    const perto = ESCALA_CORPO && ombrosCru >= MAO_GRANDE
+                ? "Afaste um pouco a mão da câmera.\n" : "";
+    legenda($("t-calibra"),
         saude.erros > 20 ? "A leitura falhou neste aparelho."
       : !viuOsPontos    ? "Levante uma das mãos."
-      : ESCALA_CORPO && ombrosCru >= MAO_GRANDE
-                        ? "Afaste um pouco a mão da câmera.\nEla precisa caber inteira no quadro."
-      /* o último ramo é o único que fala com quem JÁ está pronto, e ele passa a
-         nomear o que está na tela em vez de pedir disposição: a bola é a mão, e
-         é ela que desenha. Os três ramos acima continuam intactos — resolvem
-         problemas reais (leitura falhando, mão ausente, mão colada na câmera) e
-         nenhum deles é substituído por este texto. */
-      : "Essa bola representa sua mão.\nEla criará o desenho conforme você mexer sua mão.";
+      /* o último ramo é o único que fala com quem JÁ está pronto, e ele nomeia o
+         que está na tela em vez de pedir disposição: a bola é a mão, e é ela que
+         desenha. Os dois ramos acima continuam intactos — leitura falhando e mão
+         ausente resolvem problemas reais e nenhum é substituído por este texto. */
+      : perto + "Essa bola representa sua mão.\nEla criará o desenho conforme você mexer sua mão.");
     talvezDiag(agora);
     pinta(); return;
   }
