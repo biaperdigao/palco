@@ -105,6 +105,30 @@
   .plc-diag th:first-child{text-align:left}
   .plc-diag td{text-align:right; padding:2px 8px 2px 0; white-space:nowrap}
   .plc-diag td:first-child{text-align:left; color:var(--cinza)}
+
+  /* --- o bloco de celular --- */
+  .plc-diag .cel{border-top:0; padding-top:0}
+  .cel-grade{display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--linha);
+    border:1px solid var(--linha); margin-bottom:10px}
+  .cel-linha{background:var(--papel); padding:7px 9px; display:flex; flex-direction:column; gap:2px}
+  .cel-linha span{font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--cinza)}
+  .cel-linha b{font-size:15px; font-weight:500; font-variant-numeric:tabular-nums}
+  .cel-aviso b{color:#FF5A5A}
+  .cel-botao{width:100%; padding:15px; background:var(--tinta); color:var(--papel);
+    border:0; font-family:var(--ui); font-size:12px; letter-spacing:.2em;
+    text-transform:uppercase; cursor:pointer; -webkit-appearance:none; border-radius:0}
+  .cel-botao:active{opacity:.7}
+  .cel-nota{margin:7px 0 0; color:var(--cinza); font-size:10px; line-height:1.5}
+
+  /* --- em tela estreita o painel vira coluna legível, e as tabelas rolam --- */
+  @media (max-width: 700px){
+    body{padding:14px 10px 40px}
+    .plc-diag{font-size:11.5px; padding:11px}
+    .plc-diag table{min-width:420px}
+    .plc-diag section{overflow-x:auto}
+    .plc-diag code{word-break:break-all; font-size:10px}
+    .cel-grade{grid-template-columns:1fr 1fr}
+  }
   .plc-diag .morre{color:#FF5A5A}
   .plc-diag .passa{color:#6E93FF}
   .plc-diag .vivo{color:#FFFFFF; font-weight:600}
@@ -2291,9 +2315,105 @@ function pct(vs, q){
   return a[Math.min(a.length-1, Math.floor(q*a.length))];
 }
 
+/* ===================== o diagnóstico de celular =====================
+   Medir no celular é fácil; TIRAR O DADO DE LÁ é que não é. Copiar uma linha de
+   600 caracteres numa tela de 390px é inviável, não há console, e as tabelas do
+   painel têm 480px de largura mínima. Então o diagnóstico de celular é duas
+   coisas: um bloco curto com o que só importa nele, e um jeito de mandar isso
+   embora com um toque.
+
+   O que ele mede e o painel de mesa não media:
+   · fps REAL — quase tudo depende dele, e no celular ele é metade
+   · o que a câmera ENTREGOU contra o que foi pedido (640×480 deitado): num
+     aparelho em pé o navegador pode dar outra coisa
+   · a cena fixa de 960×720 contra o tamanho em que ela aparece no aparelho
+   · quanto do quadro a mão ocupa — é o que explica ombros bater no teto de 700
+   · o teto de traço em vigor, que é adaptativo e no celular vive encolhido */
+const ECRA_ESTREITO = () =>
+  innerWidth < 700 || (matchMedia && matchMedia("(pointer:coarse)").matches);
+
+function medidasDoAparelho(){
+  const r = tela.getBoundingClientRect();
+  const dur = (saude.t1 - saude.t0)/1000;
+  return {
+    fps: dur > 0.2 ? saude.quadros/dur : null,
+    aparelho: `${innerWidth}×${innerHeight}`,
+    dpr: (devicePixelRatio || 1).toFixed(1),
+    orientacao: innerHeight >= innerWidth ? "em pé" : "deitado",
+    camera: video && video.videoWidth ? `${video.videoWidth}×${video.videoHeight}` : "—",
+    cena: `${W}×${H}`,
+    cenaNaTela: `${Math.round(r.width)}×${Math.round(r.height)}`,
+    /* a mão ocupa quanto do quadro? ombros é 4× a medida punho–base do médio, e
+       o teto de 700 é o sinal de que ela está colada na câmera */
+    maoNoQuadro: (ombros/VIEW_MIN*100).toFixed(0) + "%",
+    noTeto: ombros >= OMBROS_MAX - 1,
+    traco: Math.round(tracoAgora()),
+    util: saude.quadros ? (saude.comLeitura/saude.quadros*100).toFixed(0)+"%" : "—",
+  };
+}
+
+function resumoDoCelular(){
+  const m = medidasDoAparelho();
+  return `CELULAR · ${m.aparelho} @${m.dpr}x ${m.orientacao} · fps ${num(m.fps,1)} · ` +
+         `camera ${m.camera} · cena ${m.cena} em ${m.cenaNaTela} · ` +
+         `mao ${m.maoNoQuadro} do quadro${m.noTeto?" (NO TETO)":""} · ` +
+         `util ${m.util} · traco ${m.traco}ms · ombros ${num(ombros)}`;
+}
+
+function blocoDoCelular(){
+  const m = medidasDoAparelho();
+  const linha = (rot, val, aviso) =>
+    `<div class="cel-linha${aviso?" cel-aviso":""}"><span>${rot}</span><b>${val}</b></div>`;
+  return `<section class="cel">
+    <h4>Aparelho</h4>
+    <div class="cel-grade">
+      ${linha("fps", num(m.fps,1), m.fps != null && m.fps < 24)}
+      ${linha("quadros úteis", m.util, saude.quadros && saude.comLeitura/saude.quadros < 0.6)}
+      ${linha("tela", m.aparelho + " @" + m.dpr + "x " + m.orientacao)}
+      ${linha("câmera entregou", m.camera)}
+      ${linha("cena", m.cena + " em " + m.cenaNaTela)}
+      ${linha("mão no quadro", m.maoNoQuadro, m.noTeto)}
+      ${linha("teto do traço", m.traco + "ms")}
+      ${linha("escala do corpo", num(ombros) + (m.noTeto ? " no teto" : ""), m.noTeto)}
+    </div>
+    <button class="cel-botao" id="cel-manda">mandar diagnóstico</button>
+    <p class="cel-nota">Um toque: abre o compartilhar do aparelho, ou copia se ele não tiver.</p>
+  </section>`;
+}
+
+/* o caminho de volta: compartilhar nativo, com a área de transferência de
+   reserva. É a parte que faz o diagnóstico de celular existir de verdade. */
+async function mandaDiagnostico(botao){
+  const texto = resumoDoCelular() + "\n\n" + ($("diag-resumo") ? $("diag-resumo").textContent : "");
+  const avisa = t => { botao.textContent = t; setTimeout(() => botao.textContent = "mandar diagnóstico", 2200); };
+  try{
+    if (navigator.share){ await navigator.share({ title:"PALCO — diagnóstico", text:texto }); return; }
+  }catch(e){ if (e && e.name === "AbortError") return; }
+  try{
+    await navigator.clipboard.writeText(texto);
+    avisa("copiado ✓");
+  }catch(e){
+    /* sem permissão de área de transferência: deixa o texto selecionável */
+    const cx = $("diag-resumo");
+    if (cx){ const sel = getSelection(), r = document.createRange();
+             r.selectNodeContents(cx); sel.removeAllRanges(); sel.addRange(r); }
+    avisa("selecionado — copie");
+  }
+}
+
+let cliqueLigado = false;
 function pintaDiag(){
   const d = $("diag");
   if (d.hidden) return;
+  if (!cliqueLigado){
+    /* o innerHTML do painel é refeito a cada pintura, então o ouvinte não pode
+       estar no botão: fica no pai, uma vez só */
+    d.addEventListener("click", ev => {
+      const b = ev.target.closest && ev.target.closest("#cel-manda");
+      if (b) mandaDiagnostico(b);
+    });
+    cliqueLigado = true;
+  }
   const dur = (saude.t1 - saude.t0)/1000;
   const aceitos = episodios.filter(e => e.aceito).length;
 
@@ -2461,6 +2581,7 @@ function pintaDiag(){
     (CORTA_SALTO ? "" : " · SALTO OFF");
 
   d.innerHTML = `
+    ${blocoDoCelular()}
     <section><h4>Veredito</h4><p class="${veredito[0]}">${veredito[1]}</p>
       <p style="margin-top:8px">resumo para copiar: <code id="diag-resumo">${resumo}</code></p></section>
     <section><h4>Máquina de exclusividade — ao vivo</h4>${maquina}</section>
