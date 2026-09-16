@@ -330,7 +330,12 @@
     }
     .plc-rodape::before{display:none}
     .plc-rodape p:not(.dir){grid-column:1; grid-row:2; text-align:left}
-    .plc-rodape #ctrl{grid-column:2; grid-row:1; justify-self:end}
+    /* OS BOTÕES OCUPAM A FAIXA INTEIRA, não a coluna da direita. Deixados na
+       coluna 2, era a LARGURA DELES que dimensionava a coluna — salvar+refazer
+       dão ~195px, e o aviso de privacidade ficava com 151px dos 358, quebrando
+       em cinco linhas. Numa faixa própria eles continuam encostados à direita e
+       a linha de baixo volta a ser repartida pelos dois textos. */
+    .plc-rodape #ctrl{grid-column:1 / -1; grid-row:1; justify-self:end}
     .plc-rodape .dir{grid-column:2; grid-row:2; text-align:right; white-space:normal}
   }
   /* de pé e apertado: a cena ainda precisa caber */
