@@ -186,7 +186,14 @@
      pessoa tem de ler naqueles dois segundos. */
   #c-conta #t-conta{
     position:absolute; left:0; right:0; top:calc(50% + 42px);
-    margin:0; padding:0 24px; color:var(--tinta);
+    /* MARGEM AUTO, E NÃO ZERO. left:0 e right:0 dão a faixa inteira, mas a
+       legenda tem max-width de 28ch: a caixa fica menor que a faixa, e aí o
+       caso é "sobre-restrito" — em texto da esquerda para a direita o navegador
+       descarta o right e encosta a caixa em left:0. Num celular a faixa é tão
+       estreita quanto o teto, então a frase parecia centrada; num monitor de
+       1440 ela ia para a borda esquerda, a meia tela do número. Margem auto nos
+       dois lados reparte a sobra e centra a caixa de verdade. */
+    margin:0 auto; padding:0 24px; color:var(--tinta);
   }
   .plc-relogio{position:absolute; top:12px; left:14px; z-index:4; font-size:10px; letter-spacing:.16em;
     color:var(--cinza); font-variant-numeric:tabular-nums}
