@@ -1092,6 +1092,11 @@ function arcoDeTrecho(p){
               juntas poder rodar quantas vezes quiser sem encolher o arco.
               Guardada AGORA porque depois não dá para reconstituir. */
            baseStart:a0, baseExtent:ext, baseOx:c.x, baseOy:c.y,
+           /* a lista de cruzamentos nasce com o arco. Antes quem a criava era a
+              passada das juntas, na primeira vez que o arco passava por ela — e
+              agora um arco pode nunca passar por lá (ver o congelamento em
+              incorpora), o que deixaria o diagnóstico lendo undefined. */
+           cruz:[],
            rGesto:f.r, devGesto:f.medio/f.r, nPts:p.length };
 }
 
@@ -2187,9 +2192,36 @@ function incorpora(e){
   }
   if (e) e.arcos = Math.max(arcos.length, vivo ? 0 : (e.aceito ? 1 : 0));
   if (!composicao.length) return;
-  refazPassadas();
-  /* e agora tudo o que já fechou está pronto: a passada seguinte não o toca mais */
+  /* CONGELAR VEM ANTES DE APARAR, E ISSO É O CONSERTO DE UM TRAÇO QUE CRESCIA
+     SOZINHO NA TELA.
+
+     A ordem era a inversa: aparava-se o arco recém-fechado contra os
+     cruzamentos, e só depois ele era dado por pronto. Parece inofensivo — é UMA
+     aparada, na hora certa — mas ela nunca sobrevivia. A coesão, que roda no
+     começo da passada seguinte, restaura o span de TODO arco fixo para poder
+     medir folga sobre o arco inteiro; a passada das juntas, logo depois, se
+     recusa a reaparar quem já fechou ("pronto é pronto"). Entre as duas, o arco
+     saía com o span cheio de volta e ficava assim.
+
+     Na tela: um traço ACABADO crescendo sozinho, no instante em que o gesto
+     seguinte fechava. Medido na abertura, a curva de baixo do L ia de 84° para
+     98° — 60px de traço aparecendo do nada — bem quando o C começava, que é
+     exatamente onde a pessoa estava olhando.
+
+     Congelando primeiro, o arco nunca é aparado, e por isso nunca desapara. O
+     DESENHO FINAL NÃO MUDA em nada: como a aparada jamais chegava ao resultado
+     (a coesão a desfazia sempre, aqui e no encerra), o que sai agora é o que já
+     saía — sem o pisca-pisca no meio. E o arco que a pessoa viu crescer passa a
+     ser, letra por letra, o arco que fica.
+
+     O PREÇO, dito em voz alta: a aparada de 19° da §5.3 deixa de acontecer neste
+     caminho. Ela já não acontecia no desenho final — mas agora não acontece nem
+     por um quadro, e o diagnóstico passa a dizer a verdade ("arcos livres") em
+     vez de contar juntas que seriam desfeitas. Fazê-la valer de novo é decisão
+     de desenho, não de código: encurta as pontas de vários arcos e muda a forma
+     da marca. */
   for (const a of composicao) if (!a.vivo) a.congelado = true;
+  refazPassadas();
   /* o enquadramento NÃO se mexe durante a captura. Reenquadrar a cada gesto
      mudaria a escala do que já está na tela enquanto a pessoa ainda está se
      movendo, e o gesto seguinte não cairia onde ela mira. Fica 1:1 até o fim. */
@@ -4164,12 +4196,22 @@ function desfaz(vivo, depois){
      cada um custa 600ms de entrada mais ausência. Em 7,8s sobrava tempo de
      desenho quase nenhum e a mão ia a 13500px/s — o motor recebia 5 arcos em vez
      de 10. O teto que a cliente deu é 10s; é onde a construção cabe. */
-  /* O ALVO ACOMPANHA O COMPRIMENTO, não o contrário. As três curvas novas somam
-     mais caminho do que os traços soltos de antes, e espremer isso em 7,8s punha
-     a mão a 1500px/s — velocidade alta é o que faz a entrada inflar o ajuste e
-     estragar o P. Mantendo a mão no ritmo que deu certo (~1100px/s), a abertura
-     fica em ~8,7s, ainda dentro do teto de 10s. */
-  const ALVO_MS   = +Q.get("abertura") || 8700;
+  /* O ALVO ACOMPANHA O COMPRIMENTO, não o contrário: V sai do orçamento, e o
+     orçamento é o que sobra do alvo depois dos tempos fixos.
+
+     ELA PEDIU MAIS RÁPIDA, e 8,7s tinha folga de sobra. O alvo antigo punha a mão
+     a 655px/s — quase metade do teto — porque fora calculado para um caminho mais
+     longo do que o que a CONSTRUCAO faz hoje. Medido nos dois ritmos, o desenho
+     não muda: a 655px/s os raios saem 298/222/224/241/222/224/245/222/223 e a
+     1166px/s saem 299/222/223/241/222/223/240/222/223, com os mesmos 9 arcos.
+     Um ou dois pixels de raio é ruído do ajuste, não perda.
+
+     6500 É O CHÃO ÚTIL, e não um número escolhido no olho: abaixo dele V bate em
+     V_MAX e o alvo deixa de ter efeito — os tempos fixos (6 entradas, 6
+     ausências, a espera e o desfazer) somam 3680ms, e o desenho em si já está na
+     velocidade máxima. Para ir além de ~6,5s não é aqui que se mexe: é no ritmo
+     entre os traços, que é decisão de desenho. */
+  const ALVO_MS   = +Q.get("abertura") || 6500;
   const V_MAX     = 1200;    // px/s: acima disto a entrada começa a inflar
   const SEGURA_MS = 500;
 
