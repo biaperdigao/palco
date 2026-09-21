@@ -2883,6 +2883,71 @@ function animaComposicao(){
    de ler como uma imagem só. Terminal semicircular = lineCap round (§4). */
 /* O ponto de repouso. FORA do filtro gooey de propósito: no esboço do símbolo
    ele é um ponto sólido ISOLADO à parte, não um nó fundido nos arcos. */
+/* ===================== A MÃO DA DEMONSTRAÇÃO =====================
+   "queria que a demonstração tivesse uma animação, como a da entrada, pra
+    pessoa clicar e entender o que ela tem que fazer, mas ao redor da bolinha
+    teremos a silhueta de uma mão cinza."
+
+   A abertura já alimenta o motor com uma mão que não existe. O que faltava era
+   MOSTRAR a mão: sem ela, a bolinha é um ponto que anda sozinho, e a pessoa vê
+   um desenho se fazendo sem entender que é ela quem faz.
+
+   A SILHUETA MORA AQUI, e não no arquivo da peça, porque ela é desenhada no
+   mesmo lugar e no mesmo quadro que a bola: mesma transformação de
+   enquadramento, mesmo passo de inércia. Por fora — numa camada de DOM em cima
+   do canvas — ela ficaria um quadro atrasada, e sairia do lugar assim que a
+   moldura começasse a perseguir a caixa da composição.
+
+   CINZA É ALFA, NÃO UMA COR. A peça tem duas cores, e nela --cinza é igual a
+   --tinta; um cinza literal viraria um terceiro tom, que a /fila-a não
+   inverteria. A tinta a 0,30 sobre o papel dá cinza nos dois temas — é o mesmo
+   caminho da mão-guia da calibragem.
+
+   O TAMANHO SAI DA BOLA, não da tela. O ponto que o rastreador entrega é o
+   centróide da PALMA (ver fonte.palma), então a bola já está onde a palma está:
+   a mão é desenhada em volta dela, em múltiplos do raio dela. Assim a silhueta
+   acompanha a espessura do traço sem nenhum número próprio.
+
+   ELA NÃO GIRA. Uma mão de verdade inclina no fim da varredura, mas o ângulo
+   teria de sair da velocidade da bola, e pintar não pode guardar estado — e uma
+   mão que roda junto com um arco de 150° lê como um ponteiro, não como uma mão. */
+const MAO_DEMO_ALFA = 0.30;
+const MAO_DEMO_TAM  = 10.5;          // o comprimento da mão, em raios de bola
+let maoDemoLigada = false;
+
+/* Cada parte é uma CÁPSULA: dois semicírculos e os dois lados retos. Todas
+   entram no MESMO path, com a mesma orientação, e um fill nonzero as funde numa
+   silhueta só. Desenhadas uma a uma com alfa parcial, cada sobreposição
+   apareceria mais escura e a mão viraria uma colagem de dedos. */
+function capsula(c, ax, ay, bx, by, r){
+  const a = Math.atan2(by-ay, bx-ax), Q = Math.PI/2;
+  c.moveTo(ax + Math.cos(a+Q)*r, ay + Math.sin(a+Q)*r);
+  c.arc(ax, ay, r, a+Q, a+Q+Math.PI);      // a tampa de trás
+  c.arc(bx, by, r, a-Q, a+Q);              // a reta (implícita) e a tampa da frente
+  c.closePath();
+}
+
+/* A MÃO, EM COMPRIMENTOS DE MÃO, com a origem no centro da palma — que é onde a
+   bola está. Mão direita de palma para a câmera, dedos para cima: o polegar cai
+   à esquerda, que é o lado em que ele aparece no espelho da câmera. */
+const MAO_DEMO_PARTES = [
+  [ 0.000,  0.255,  0.000, -0.050, 0.195 ],   // a palma
+  [-0.145, -0.080, -0.175, -0.440, 0.045 ],   // indicador
+  [-0.048, -0.100, -0.052, -0.500, 0.046 ],   // médio
+  [ 0.048, -0.100,  0.062, -0.460, 0.044 ],   // anelar
+  [ 0.140, -0.060,  0.175, -0.350, 0.040 ],   // mínimo
+  [-0.165,  0.130, -0.335, -0.030, 0.055 ],   // polegar
+];
+function pintaMaoDemo(b, rb, alfa){
+  const h = rb*MAO_DEMO_TAM;
+  const c = new Path2D();
+  for (const p of MAO_DEMO_PARTES)
+    capsula(c, b.x + p[0]*h, b.y + p[1]*h, b.x + p[2]*h, b.y + p[3]*h, p[4]*h);
+  ctx.globalAlpha = alfa*MAO_DEMO_ALFA;
+  ctx.fill(c);
+  ctx.globalAlpha = alfa;
+}
+
 function pintaBola(esp, q, alfa){
   const b = bolaDes || bola;
   if (!b) return;
@@ -2892,13 +2957,24 @@ function pintaBola(esp, q, alfa){
   ctx.fillStyle = corDoTema("--tinta", "#FFFFFF");
   /* o raio é em espessuras DE TELA, então dividido pela escala do enquadramento
      — a bola não muda de tamanho quando a composição muda de escala. */
-  ctx.beginPath(); ctx.arc(b.x, b.y, esp*BOLA_RAIO/q.k, 0, 7); ctx.fill();
+  const rb = esp*BOLA_RAIO/q.k;
+  /* a silhueta vem ANTES da bola e DEPOIS do traço: uma mão de verdade fica
+     entre a pessoa e o desenho, e a bola volta por cima dela porque é a bola que
+     manda — a mão é o contexto, não o ponto. */
+  if (maoDemoLigada) pintaMaoDemo(b, rb, alfa);
+  ctx.beginPath(); ctx.arc(b.x, b.y, rb, 0, 7); ctx.fill();
   ctx.restore();
   ctx.setTransform(1,0,0,1,0,0);
 }
 
 function pintaComposicao(alfa = 1){
-  if (!composicao.length) return;
+  if (!composicao.length){
+    /* ainda não há traço nenhum. Na demonstração isso não pode significar tela
+       vazia: a mão é a resposta à pergunta "o que eu tenho que fazer?", e chegar
+       só depois do primeiro arco fechar é chegar tarde. */
+    if (maoDemoLigada) pintaBola(espessuraDe(composicao), molduraDes || moldura, alfa);
+    return;
+  }
   /* a espessura sai do raio, e a coesão e as juntas nunca mexem em raio: ela é a
      mesma na geometria alvo e na desenhada. O ENQUADRAMENTO não — ele persegue,
      porque a caixa da composição muda enquanto os arcos deslizam. */
@@ -3834,6 +3910,10 @@ window.PLC = {
   pintaComposicao, get off(){return off}, get off2(){return off2},
   G: { GOO_BLUR_RATIO, GOO_ALPHA_GAIN, GOO_ALPHA_BIAS, GOO_FILETE, GOO_LIGADO },
   processaQuadro, percurso, amplitude, velocidade, pinta, pintaDiag, vai,
+  /* liga e desliga a silhueta cinza em volta da bola. Só a demonstração usa:
+     na captura de verdade a mão da pessoa já está ali, na frente da câmera, e
+     uma segunda mão desenhada seria o mesmo registro duas vezes (§6). */
+  maoDemo(v){ maoDemoLigada = !!v; },
   get estado(){return estado},
   /* AS REGRAS DE PALCO, LIGADAS E DESLIGADAS EM TEMPO DE EXECUÇÃO.
      Elas existem para domar o gesto de uma pessoa real, puxando tudo para o meio
@@ -3933,6 +4013,75 @@ window.PLC = {
 
    Isto é LAYOUT e mora só neste arquivo. confere-motores.sh compara o MAIOR
    bloco de script, que é o motor; este é pequeno de propósito. */
+/* ---------- O QUE AS DUAS ANIMAÇÕES TÊM EM COMUM ----------
+   A abertura e a demonstração são a mesma ferramenta com caminhos diferentes:
+   uma LINHA de posições de mão, uma por quadro do relógio sintético, alimentada
+   no motor pela mesma porta de teste, e no fim a composição se desfazendo por
+   onde entrou. O que muda entre elas é só o caminho, as regras de palco e se a
+   mão aparece. Estes quatro tempos e estas duas funções são do MECANISMO, não
+   da abertura — por isso moram aqui fora, e não dentro dela. */
+const DT = 1000/60;             // o relógio sintético: passo fixo, não o do vídeo
+const DESFAZ_MS = 900;
+const ENTRADA_MS = 180;   // a mão entra antes do traço (ver JANELA_MS abaixo)
+/* A MÃO SOME NO FIM DE CADA TRAÇO, EM VEZ DE PARAR.
+   Parar não fecha limpo: velocidade() lê uma janela de JANELA_MS = 120ms, então
+   depois de um traço rápido a velocidade só cai 120ms depois de a mão parar, e
+   nesse meio-tempo o motor — que acabou de fechar por "arco cheio" e reabre na
+   hora, que é a retomada — agarra o rabo do traço mais a parada inteira. Medido:
+   episódios espúrios de 76, 144 e 145px virando arquinhos soltos no desenho.
+
+   Sumindo, o buffer esvazia em PERDA_MS = 160ms, o episódio fecha por ponto
+   perdido com o traço inteiro dentro, e enquanto não há leitura NADA pode
+   abrir. Também sai mais barato: 200 + 340 contra 380 + 340. A bolinha fica
+   onde estava, porque ela só anda quando há leitura. */
+/* A VIAGEM ATÉ O PRÓXIMO TRAÇO TAMBÉM ACONTECE COM A MÃO FORA.
+   Tentei fazê-la dentro dos ASSENTA_MS, com a bolinha visível andando. Não dá:
+   quando o último fecho do gesto é por "arco cheio", não HÁ assentamento — o
+   motor volta a "procurando" na hora, pela retomada — e aí a viagem inteira
+   vira traço. Era o diagonal comprido atravessando o canto de cima.
+
+   Fora do quadro, nada pode abrir, venha o fecho de onde vier. 450ms cobrem o
+   pior caso: o fecho cai por volta dos 160ms de ausência e o assentamento vai
+   até 580; a mão reaparece aos 450 e seus primeiros 130ms são engolidos — que
+   é exatamente para isso que a entrada existe. O traço começa aos 630, já
+   livre. O preço é a bolinha sumir entre um gesto e outro, que é o que
+   acontece quando a mão sai do quadro de verdade. */
+/* A ausência agora serve só para a bolinha sumir entre um gesto e outro: quem
+   separa os gestos é PLC.teste.corta(), chamado no começo dela. Antes ela
+   precisava ser maior que PERDA_MS mais o assentamento, e por isso valia 450. */
+const AUSENCIA_MS = 200;
+
+/* UM QUADRO DA MÃO QUE NÃO EXISTE. null é a mão fora do quadro. */
+function fazPasso(linha, i, T0){
+  const P = PLC.P, a = linha[i];
+  /* o primeiro quadro sem mão de cada intervalo corta o gesto em voz alta */
+  if (!a && linha[i-1]) PLC.teste.corta(T0 + i*DT);
+  PLC.teste.quadro(a ? [{ i:0, x: 1 - a.x/P.W, y: a.y/P.H }] : null, T0 + i*DT, P.OMBROS_REF);
+}
+
+/* ---------- desfazer: a composição sai por onde entrou ----------
+   `vivo` é a pergunta "esta corrida ainda vale?": quem clica no meio da
+   animação interrompe o desfazer no quadro seguinte, sem esperar os 900ms. */
+function desfaz(vivo, depois){
+  const comp = PLC.composicao;
+  PLC.teste.anima();               // assenta a inércia: des volta a null
+  const alc = comp.map(a => (a.r||0)*(a.span||0) || 1);
+  const soma = alc.reduce((x,y)=>x+y, 0);
+  let t0 = null;
+  requestAnimationFrame(function passo(t){
+    if (!vivo()) return;
+    if (t0 === null) t0 = t;
+    const u = Math.min(1, (t-t0)/DESFAZ_MS);
+    let resta = (1-u)*soma;
+    for (let i=0;i<comp.length;i++){
+      comp[i].frac = Math.max(0, Math.min(1, resta/alc[i]));
+      resta -= alc[i];
+    }
+    PLC.pinta();
+    if (u < 1) requestAnimationFrame(passo); else depois();
+  });
+}
+
 (async () => {
   const svg = document.querySelector(".plc-simbolo");
   const arteSvg = document.querySelector(".plc-arte");
@@ -4011,7 +4160,6 @@ window.PLC = {
                         { t:"arco-1" }] },
     { letra:"c", pecas:[{ t:"arco-0" }, { t:"arco-2", de:"arco-1", ate:"ponta" }] },
   ];
-  const DT = 1000/60;             // o relógio sintético: passo fixo, não o do vídeo
   /* A construção da marca pede 10 gestos (ver CONSTRUCAO e o corte por span), e
      cada um custa 600ms de entrada mais ausência. Em 7,8s sobrava tempo de
      desenho quase nenhum e a mão ia a 13500px/s — o motor recebia 5 arcos em vez
@@ -4024,35 +4172,6 @@ window.PLC = {
   const ALVO_MS   = +Q.get("abertura") || 8700;
   const V_MAX     = 1200;    // px/s: acima disto a entrada começa a inflar
   const SEGURA_MS = 500;
-  const DESFAZ_MS = 900;
-  const ENTRADA_MS = 180;   // a mão entra antes do traço (ver JANELA_MS abaixo)
-  /* A MÃO SOME NO FIM DE CADA TRAÇO, EM VEZ DE PARAR.
-     Parar não fecha limpo: velocidade() lê uma janela de JANELA_MS = 120ms, então
-     depois de um traço rápido a velocidade só cai 120ms depois de a mão parar, e
-     nesse meio-tempo o motor — que acabou de fechar por "arco cheio" e reabre na
-     hora, que é a retomada — agarra o rabo do traço mais a parada inteira. Medido:
-     episódios espúrios de 76, 144 e 145px virando arquinhos soltos no desenho.
-
-     Sumindo, o buffer esvazia em PERDA_MS = 160ms, o episódio fecha por ponto
-     perdido com o traço inteiro dentro, e enquanto não há leitura NADA pode
-     abrir. Também sai mais barato: 200 + 340 contra 380 + 340. A bolinha fica
-     onde estava, porque ela só anda quando há leitura. */
-  /* A VIAGEM ATÉ O PRÓXIMO TRAÇO TAMBÉM ACONTECE COM A MÃO FORA.
-     Tentei fazê-la dentro dos ASSENTA_MS, com a bolinha visível andando. Não dá:
-     quando o último fecho do gesto é por "arco cheio", não HÁ assentamento — o
-     motor volta a "procurando" na hora, pela retomada — e aí a viagem inteira
-     vira traço. Era o diagonal comprido atravessando o canto de cima.
-
-     Fora do quadro, nada pode abrir, venha o fecho de onde vier. 450ms cobrem o
-     pior caso: o fecho cai por volta dos 160ms de ausência e o assentamento vai
-     até 580; a mão reaparece aos 450 e seus primeiros 130ms são engolidos — que
-     é exatamente para isso que a entrada existe. O traço começa aos 630, já
-     livre. O preço é a bolinha sumir entre um gesto e outro, que é o que
-     acontece quando a mão sai do quadro de verdade. */
-  /* A ausência agora serve só para a bolinha sumir entre um gesto e outro: quem
-     separa os gestos é PLC.teste.corta(), chamado no começo dela. Antes ela
-     precisava ser maior que PERDA_MS mais o assentamento, e por isso valia 450. */
-  const AUSENCIA_MS = 200;
 
   /* ---------- a arte, rasterizada, para achar o eixo e a espessura ---------- */
   const clone = arteSvg.cloneNode(true);
@@ -4425,12 +4544,7 @@ window.PLC = {
   const T0 = 1e6;                    // relógio sintético próprio, longe do zero
   let parado = false, iAmostra = 0;
 
-  function passoDaMao(i){
-    const a = linha[i];
-    /* o primeiro quadro sem mão de cada intervalo corta o gesto em voz alta */
-    if (!a && linha[i-1]) PLC.teste.corta(T0 + i*DT);
-    PLC.teste.quadro(a ? [{ i:0, x: 1 - a.x/W, y: a.y/H }] : null, T0 + i*DT, P.OMBROS_REF);
-  }
+  const passoDaMao = i => fazPasso(linha, i, T0);
 
   /* AS REGRAS VOLTAM AO QUE ERAM, não a valores fixos. Escrevendo true/false na
      mão, a abertura apagava o que tinha vindo da URL: ?corrente=0, ?traco=,
@@ -4459,27 +4573,6 @@ window.PLC = {
     PLC.vai("abertura");             // mas a tela é a da abertura
     const r = document.getElementById("relogio"), b = document.getElementById("barra");
     if (r) r.hidden = true; if (b) b.hidden = true;
-  }
-
-  /* ---------- desfazer: a composição sai por onde entrou ---------- */
-  function desfaz(depois){
-    const comp = PLC.composicao;
-    PLC.teste.anima();               // assenta a inércia: des volta a null
-    const alc = comp.map(a => (a.r||0)*(a.span||0) || 1);
-    const soma = alc.reduce((x,y)=>x+y, 0);
-    let t0 = null;
-    requestAnimationFrame(function passo(t){
-      if (parado) return;
-      if (t0 === null) t0 = t;
-      const u = Math.min(1, (t-t0)/DESFAZ_MS);
-      let resta = (1-u)*soma;
-      for (let i=0;i<comp.length;i++){
-        comp[i].frac = Math.max(0, Math.min(1, resta/alc[i]));
-        resta -= alc[i];
-      }
-      PLC.pinta();
-      if (u < 1) requestAnimationFrame(passo); else depois();
-    });
   }
 
   const aoManifesto = () => {
@@ -4537,9 +4630,135 @@ window.PLC = {
     const ate = Math.min(N, Math.ceil((t - inicioReal)/DT));
     while (iAmostra < ate) passoDaMao(iAmostra++);
     if (iAmostra < N) requestAnimationFrame(passo);
-    else { relata(); setTimeout(() => desfaz(aoManifesto), SEGURA_MS); }
+    else { relata(); setTimeout(() => desfaz(() => !parado, aoManifesto), SEGURA_MS); }
   });
 })();
+
+/* ===================== A DEMONSTRAÇÃO =====================
+   "a parte de demonstração eu gostaria que tivesse uma animação (como a da
+    entrada), pra pessoa clicar e entender o que ela tem que fazer, mas no caso,
+    ao redor da bolinha teremos a silhueta de uma mão cinza."
+
+   O botão chamava ligaDedo: era um segundo "usar o mouse" com outro nome, e não
+   demonstrava nada. Agora ele mostra.
+
+   É A MESMA FERRAMENTA DA ABERTURA, com três diferenças, e só três:
+
+   1. O CAMINHO. A abertura percorre a marca; a demonstração faz três varreduras
+      largas — que é o que a peça já pede em voz alta na contagem ("faça
+      movimentos amplos e suaves"). Desenhar o logotipo aqui ensinaria a coisa
+      errada: a pessoa não tem de copiar um desenho, tem de fazer um gesto.
+
+   2. AS REGRAS DE PALCO FICAM LIGADAS. A abertura as afrouxa por necessidade —
+      com paraOPalco no caminho, nenhuma trajetória de mão produz a marca. Aqui
+      é o contrário que vale: o que a pessoa vê tem de ser o que ela vai
+      receber, com o mesmo puxão para o meio da cena e a mesma faixa de raio.
+      Por isso este bloco não chama PLC.regras, e não tem nada a devolver no fim.
+
+   3. A MÃO APARECE. É a resposta à pergunta que o botão faz, e quem a desenha é
+      o motor, em volta da bola (ver pintaMaoDemo lá).
+
+   No fim a peça se desfaz, como na abertura, e os botões voltam: a pessoa viu o
+   que fazer e escolhe sozinha entre a câmera e o mouse. */
+{
+  const btn = document.getElementById("b-demo");
+  const camada = document.getElementById("c-abertura");
+  /* sem motor, sem camada ou sem a mão, o botão continua sendo o que o motor
+     fez dele: o modo mouse. A demonstração só se anuncia quando pode acontecer. */
+  if (btn && camada && window.PLC && PLC.teste && PLC.maoDemo){
+    const Q = new URLSearchParams(location.search);
+
+    /* ~900px/s é gesto de pessoa, não de máquina — e é também o que cabe no teto
+       de TRACO_MS: uma mão sintética anda a velocidade constante, e onde uma mão
+       de verdade desacelera nas pontas e fecha o episódio pela pausa, esta aqui
+       chegaria nos 800ms de traço e seria cortada no meio do arco. */
+    const V = +Q.get("demovel") || 900;
+    const SEGURA_MS = 1200;          // o tempo de olhar o que saiu, antes de desfazer
+    const dEnt = 60;                 // a entrada, como na abertura e pelo mesmo motivo
+
+    /* TRÊS VARREDURAS LARGAS, em coordenadas de cena (960×720). Não são um
+       desenho: são o gesto. Os spans ficam perto de 150°, abaixo do
+       MEDIAN_EXTENT de 161° em que o motor fecha por "arco cheio" — assim cada
+       varredura é um episódio inteiro, fechado pela mão saindo do quadro, e não
+       um pedaço cortado no meio. Os raios ficam dentro da faixa que as regras de
+       palco admitem, para o que aparece ser o que a mão fez e não o que a
+       contenção arrastou. */
+    const GESTOS = [
+      { cx:500, cy:335, r:215, a0:-155, a1:  -5 },
+      { cx:440, cy:390, r:185, a0:  55, a1: -95 },
+      { cx:525, cy:355, r:245, a0: -30, a1: 120 },
+    ];
+
+    const linha = [];
+    for (const g of GESTOS){
+      const a0 = g.a0*Math.PI/180, span = (g.a1 - g.a0)*Math.PI/180;
+      const ponto = a => ({ x:g.cx + Math.cos(a)*g.r, y:g.cy + Math.sin(a)*g.r });
+      /* a entrada segue o PRÓPRIO arco, para trás. Reta, ela escorregaria para
+         dentro do ajuste de círculo e inflaria o raio — é a mesma conta da
+         abertura, onde isso custou r339 num traço que a marca faz com 222. */
+      const passo = -Math.sign(span)*dEnt/g.r;
+      const nEnt = Math.round(ENTRADA_MS/DT);
+      for (let i=0;i<nEnt;i++) linha.push(ponto(a0 + passo*(1 - i/nEnt)));
+      const nTra = Math.max(2, Math.round(Math.abs(span)*g.r/V*1000/DT));
+      for (let i=0;i<=nTra;i++) linha.push(ponto(a0 + span*i/nTra));
+      const nAus = Math.round(AUSENCIA_MS/DT);
+      for (let i=0;i<nAus;i++) linha.push(null);
+    }
+    const N = linha.length;
+
+    let corrida = null;              // a corrida em curso, ou null quando não há
+    let relogioDemo = 2e6;           // sintético e próprio, longe do da abertura
+
+    const aosBotoes = () => {
+      if (!corrida) return;
+      corrida = null;
+      PLC.maoDemo(false);
+      PLC.composicao.length = 0;
+      PLC.vai("repouso");
+    };
+    /* qualquer toque ou tecla encurta a demonstração, como na abertura: quem já
+       entendeu não deve ter de esperar. */
+    camada.addEventListener("click", aosBotoes);
+    addEventListener("keydown", aosBotoes);
+
+    const guarda = () => {
+      /* a mão sai de cena ANTES de a peça se desfazer: o último quadro que a
+         pessoa vê é o desenho sozinho, que é o que ela vai levar. */
+      PLC.maoDemo(false); PLC.pinta();
+      const minha = corrida, viva = () => corrida === minha;
+      setTimeout(() => { if (viva()) desfaz(viva, aosBotoes); }, SEGURA_MS);
+    };
+
+    btn.onclick = () => {
+      if (corrida) return;
+      const minha = corrida = {};
+      const viva = () => corrida === minha;
+      const T0 = (relogioDemo += 1e5);   // cada corrida no seu trecho de relógio
+      PLC.maoDemo(true);
+      PLC.teste.inicia(T0);              // zera e põe em "grava"
+      PLC.vai("abertura");               // mas sem manifesto, relógio nem barra
+      const r = document.getElementById("relogio"), b = document.getElementById("barra");
+      if (r) r.hidden = true; if (b) b.hidden = true;
+
+      /* sem movimento, a demonstração é o RESULTADO: o gesto inteiro de uma vez,
+         e a peça pronta na tela. O que ela ensina continua de pé. */
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches){
+        for (let i=0;i<N;i++) fazPasso(linha, i, T0);
+        PLC.teste.anima(); guarda(); return;
+      }
+      /* a alimentação anda pelo relógio de parede e o motor só vê o sintético:
+         quadro perdido no navegador não vira gesto diferente. */
+      let i = 0, inicioReal = null;
+      requestAnimationFrame(function passo(t){
+        if (!viva()) return;
+        if (inicioReal === null) inicioReal = t;
+        const ate = Math.min(N, Math.ceil((t - inicioReal)/DT));
+        while (i < ate) fazPasso(linha, i++, T0);
+        if (i < N) requestAnimationFrame(passo); else guarda();
+      });
+    };
+  }
+}
 </script>
 
 <!-- ===================== o cartaz =====================
