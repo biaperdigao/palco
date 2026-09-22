@@ -1265,6 +1265,140 @@ const GOO_LIGADO = !location.search.includes("goo=0");
    ZERO. Com um canvas só não há como separar as duas coisas.
    off  = os traços, alfa 1
    off2 = o resultado já fundido, alfa 1 — e é ELE que vai para a tela com o fade */
+/* ===================== O GOO NO WEBKIT =====================
+   `ctx.filter = "url(#plc-goo)"` é o caminho da §5.4, e ele NÃO EXISTE no
+   iPhone. O WebKit implementa ctx.filter só para as funções de CSS (blur,
+   contrast, …) e DESCARTA uma referência url(#id): a atribuição é ignorada, o
+   valor continua "none", nenhum erro é lançado, e o drawImage copia os traços
+   crus. Na tela isso é exatamente "o gooey não está funcionando" — os traços se
+   sobrepõem em vez de se fundirem — e vale também para o cartaz salvo, que
+   percorre o mesmo caminho. Todo navegador do iPhone é WebKit, então trocar de
+   navegador não resolve.
+
+   A saída é fazer as duas etapas à mão quando a referência não for aceita. Elas
+   são simples e estão inteiramente especificadas na §5.4:
+     1. borrar com sigma = 0,30 × espessura
+     2. o degrau de alfa: a' = 14·a − 6,75, cortado em [0,1]
+   O borrão sai do `blur()` do CSS, que o WebKit aceita; o degrau é uma passada
+   sobre o canal alfa, com a mesma conta que o feColorMatrix faz. O resultado é
+   o MESMO — conferido pixel a pixel contra o caminho do filtro (?goo=manual
+   força este caminho no computador, para a comparação ser possível).
+
+   O custo é uma leitura e uma escrita de pixels por quadro, então ela é
+   limitada à CAIXA do desenho e não à cena inteira. */
+const GOO_FORCA_MANUAL = /goo=manual/.test(location.search);
+const aceitaFiltro = v => {
+  try {
+    const c = document.createElement("canvas").getContext("2d");
+    if (!("filter" in c)) return false;
+    c.filter = v;
+    return c.filter !== "none" && c.filter !== "";
+  } catch(e){ return false; }
+};
+const GOO_URL_OK  = !GOO_FORCA_MANUAL && aceitaFiltro("url(#plc-goo)");
+const GOO_BLUR_OK = aceitaFiltro("blur(2px)");
+
+/* o degrau de alfa da §5.4, à mão. Só o canal alfa é tocado: a matriz do filtro
+   é identidade nas cores, e no offscreen a tinta já é de uma cor só. */
+function degrauDeAlfa(ctx, x0, y0, w, h){
+  w = Math.max(1, Math.min(ctx.canvas.width  - x0, Math.ceil(w)));
+  h = Math.max(1, Math.min(ctx.canvas.height - y0, Math.ceil(h)));
+  x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
+  const img = ctx.getImageData(x0, y0, w, h), d = img.data;
+  /* uma tabela de 256 entradas em vez da conta por pixel: o alfa é um byte, e
+     assim o laço faz uma busca em vez de duas multiplicações e dois cortes. */
+  if (!degrauDeAlfa.tabela){
+    degrauDeAlfa.tabela = new Uint8ClampedArray(256);
+    for (let i=0; i<256; i++)
+      degrauDeAlfa.tabela[i] = (GOO_ALPHA_GAIN*(i/255) + GOO_ALPHA_BIAS)*255;
+  }
+  const T = degrauDeAlfa.tabela;
+  for (let i=3; i<d.length; i+=4) d[i] = T[d[i]];
+  ctx.putImageData(img, x0, y0);
+}
+
+/* OS LADRILHOS DAS JUNTAS.
+   §5.4: "a única diferença visível é o canto côncavo arredondado onde dois
+   traços se cruzam" — e o critério de aceitação é a espessura da linha ficar
+   IDÊNTICA. Quer dizer que, fora das juntas, borrar e cortar devolve a própria
+   linha: varrer a cena inteira é pagar para redesenhar o que já estava lá.
+   Medido no computador, a passada na caixa do desenho custa 9,4ms por quadro —
+   num celular isso derruba a captura, que é justamente o aparelho onde este
+   caminho é o único que existe.
+
+   Então só os cruzamentos são refeitos. E TODOS DE UMA VEZ, num atlas: o caro
+   aqui não é o tamanho da região, é a LEITURA de pixels, que obriga a esperar a
+   GPU. Um ladrilho por junta, lido um a um, custou 8,7ms — praticamente o mesmo
+   que a cena inteira, porque são doze esperas em vez de duas. Empilhados num
+   canvas só, são uma leitura e uma escrita, e o tamanho volta a ser o que manda.
+
+   Cada ladrilho entra com margem, para o borrão ter vizinhança, e volta SOMADO
+   por cima do traço cru — somado, e não trocado, porque o filete só acrescenta
+   tinta no canto côncavo. A linha por baixo continua sendo a linha, e não há
+   emenda em lugar nenhum. */
+const atlas = document.createElement("canvas");
+const atctx = atlas.getContext("2d");
+
+function ladrilhosGoo(destino, origem, sigma, esp, juntas){
+  const R = Math.ceil(2.5*esp);           // até onde o filete pode chegar
+  const m = Math.ceil(3*sigma) + 1;       // o borrão precisa da vizinhança
+  const L = 2*(R + m);
+  const cols = Math.ceil(Math.sqrt(juntas.length)) || 1;
+  const linhas = Math.ceil(juntas.length/cols);
+  if (atlas.width !== cols*L || atlas.height !== linhas*L){
+    atlas.width = cols*L; atlas.height = linhas*L;
+  }
+  atctx.setTransform(1,0,0,1,0,0);
+  atctx.clearRect(0, 0, atlas.width, atlas.height);
+  atctx.filter = `blur(${sigma}px)`;
+  const postos = [];
+  juntas.forEach((X, i) => {
+    const ax = (i % cols)*L, ay = Math.floor(i/cols)*L;
+    const sx = Math.round(X.x) - R - m, sy = Math.round(X.y) - R - m;
+    /* o recorte é preso ao canvas de origem: pedir à drawImage uma região que
+       passa da borda faz ela reescalar o destino, e o ladrilho sairia torto */
+    const ix0 = Math.max(0, sx), iy0 = Math.max(0, sy);
+    const ix1 = Math.min(origem.width, sx + L), iy1 = Math.min(origem.height, sy + L);
+    if (ix1 <= ix0 || iy1 <= iy0) return;
+    atctx.drawImage(origem, ix0, iy0, ix1-ix0, iy1-iy0,
+                    ax + (ix0-sx), ay + (iy0-sy), ix1-ix0, iy1-iy0);
+    postos.push({ ax, ay, sx, sy });
+  });
+  atctx.filter = "none";
+  if (!postos.length) return;
+  degrauDeAlfa(atctx, 0, 0, atlas.width, atlas.height);   // uma leitura só
+  /* de volta, só o miolo: a borda do ladrilho tem borrão sem vizinhança */
+  for (const t of postos){
+    const dx0 = Math.max(0, t.sx + m), dy0 = Math.max(0, t.sy + m);
+    const dx1 = Math.min(destino.canvas.width,  t.sx + m + 2*R);
+    const dy1 = Math.min(destino.canvas.height, t.sy + m + 2*R);
+    if (dx1 <= dx0 || dy1 <= dy0) continue;
+    destino.drawImage(atlas, t.ax + (dx0-t.sx), t.ay + (dy0-t.sy), dx1-dx0, dy1-dy0,
+                      dx0, dy0, dx1-dx0, dy1-dy0);
+  }
+}
+
+/* A FUSÃO, pelo caminho que este navegador tiver. `juntas` são os cruzamentos
+   já em pixels de canvas — só o caminho manual precisa deles. */
+function fundeGoo(destino, origem, o){
+  destino.setTransform(1,0,0,1,0,0);
+  destino.clearRect(0, 0, destino.canvas.width, destino.canvas.height);
+  destino.save();
+  destino.globalAlpha = 1;
+  if (GOO_URL_OK){
+    destino.filter = `url(#${o.filtroId})`;
+    destino.drawImage(origem, 0, 0);
+    destino.restore();
+    return;
+  }
+  destino.drawImage(origem, 0, 0);        // o traço cru, inteiro
+  destino.restore();
+  /* sem ctx.filter nenhum (iOS 16 e antes) não há borrão, e sem borrão não há
+     junta a adoçar: fica o traço limpo, que é melhor que um traço estreitado. */
+  if (!GOO_BLUR_OK || !o.juntas || !o.juntas.length) return;
+  ladrilhosGoo(destino, origem, o.sigma, o.esp, o.juntas);
+}
+
 const off = document.createElement("canvas");
 off.width = W; off.height = H;
 const octx = off.getContext("2d");
@@ -3212,14 +3346,16 @@ function pintaComposicao(alfa = 1){
   }
   octx.setTransform(1,0,0,1,0,0);
 
-  /* a fusão acontece com alfa 1, num buffer próprio */
-  o2ctx.setTransform(1,0,0,1,0,0);
-  o2ctx.clearRect(0, 0, W, H);
-  o2ctx.save();
-  o2ctx.filter = "url(#plc-goo)";
-  o2ctx.globalAlpha = 1;
-  o2ctx.drawImage(off, 0, 0);
-  o2ctx.restore();
+  /* a fusão acontece com alfa 1, num buffer próprio. A caixa é a do desenho,
+     já com o enquadramento aplicado: é o que limita a passada de alfa do
+     caminho manual à região que tem tinta. */
+  fundeGoo(o2ctx, off, { sigma, esp, filtroId:"plc-goo",
+    /* as juntas em pixels de canvas, sobre a geometria DESENHADA: enquanto os
+       arcos deslizam, o cruzamento está onde os traços se cruzam agora. Só o
+       caminho manual as consome, então só ele paga por calculá-las. */
+    juntas: GOO_URL_OK ? null
+      : cruzamentosDe(composicao.map(desenhoDe))
+          .map(X => ({ x:X.x*q.k + q.dx, y:X.y*q.k + q.dy })) });
 
   /* e só então o fade, sobre o resultado já fundido, sem filtro no caminho */
   ctx.save();
@@ -3337,6 +3473,13 @@ function medidasDoAparelho(){
     noTeto: ombrosCru >= MAO_GRANDE,
     traco: Math.round(tracoAgora()),
     util: saude.quadros ? (saude.comLeitura/saude.quadros*100).toFixed(0)+"%" : "—",
+    /* por qual caminho o goo está passando NESTE aparelho. É a diferença entre
+       as juntas se fundirem e os traços só se sobreporem, e ela não dá erro
+       nenhum — sem esta linha, "o gooey não está funcionando" é invisível. */
+    goo: !GOO_LIGADO ? "desligado (?goo=0)"
+       : GOO_URL_OK  ? "filtro SVG"
+       : GOO_BLUR_OK ? "manual (este navegador ignora url() no canvas)"
+                     : "SEM FUSÃO — o navegador não tem filtro de canvas",
   };
 }
 
@@ -3347,7 +3490,7 @@ function resumoDoCelular(){
   return `APARELHO · ${m.aparelho} @${m.dpr}x ${m.orientacao} · fps ${num(m.fps,1)} · ` +
          `camera ${m.camera} · cena ${m.cena} em ${m.cenaNaTela} · ` +
          `mao ${m.maoNoQuadro} do quadro${m.noTeto?" (NO TETO)":""} · ` +
-         `util ${m.util} · traco ${m.traco}ms · ombros ${num(ombros)}`;
+         `util ${m.util} · traco ${m.traco}ms · ombros ${num(ombros)} · goo ${m.goo}`;
 }
 
 function blocoDoCelular(){
@@ -3364,6 +3507,7 @@ function blocoDoCelular(){
       ${linha("cena", m.cena + " em " + m.cenaNaTela)}
       ${linha("mão no quadro", m.maoNoQuadro, m.noTeto)}
       ${linha("teto do traço", m.traco + "ms")}
+      ${linha("fusão das juntas", m.goo, !GOO_URL_OK)}
       ${linha("escala do corpo", num(ombros) + (m.noTeto ? " no teto" : ""), m.noTeto)}
     </div>
     <button class="cel-botao" id="cel-manda">mandar diagnóstico</button>
@@ -4092,7 +4236,9 @@ window.PLC = {
   circuloAncorado,
   applyCompositionJoints, cruzaCirculos, anguloCruzamento, offsetNoArco, deslocamento,
   pintaComposicao, get off(){return off}, get off2(){return off2},
-  G: { GOO_BLUR_RATIO, GOO_ALPHA_GAIN, GOO_ALPHA_BIAS, GOO_FILETE, GOO_LIGADO },
+  G: { GOO_BLUR_RATIO, GOO_ALPHA_GAIN, GOO_ALPHA_BIAS, GOO_FILETE, GOO_LIGADO,
+       GOO_URL_OK, GOO_BLUR_OK },
+  fundeGoo, degrauDeAlfa,
   processaQuadro, percurso, amplitude, velocidade, pinta, pintaDiag, vai,
   /* liga e desliga a silhueta cinza em volta da bola. Só a demonstração usa:
      na captura de verdade a mão da pessoa já está ali, na frente da câmera, e
@@ -5133,12 +5279,18 @@ function desenhaArte(ctx){
   }
 
   if (!PLC.G.GOO_LIGADO){ ctx.drawImage(b1, 0, 0); return; }
+  /* pelo mesmo caminho da tela, e pelo mesmo motivo: no iPhone a referência
+     url(#…) em ctx.filter é descartada em silêncio, e o cartaz salvo sairia com
+     os traços apenas sobrepostos. fundeGoo escolhe o caminho que o navegador
+     tem. A caixa é a do desenho no papel, já com a escala do cartaz. */
+  const sigma = espP*PLC.G.GOO_BLUR_RATIO;
   document.querySelector("#plc-goo-cartaz feGaussianBlur")
-          .setAttribute("stdDeviation", String(espP*PLC.G.GOO_BLUR_RATIO));
+          .setAttribute("stdDeviation", String(sigma));
   const b2 = document.createElement("canvas"); b2.width = C.W; b2.height = C.H;
-  const g2 = b2.getContext("2d");
-  g2.filter = "url(#plc-goo-cartaz)";
-  g2.drawImage(b1, 0, 0);
+  PLC.fundeGoo(b2.getContext("2d"), b1, { sigma, esp:espP, filtroId:"plc-goo-cartaz",
+    juntas: PLC.G.GOO_URL_OK ? null
+      : PLC.cruzamentosDe(comp.map(PLC.desenhoDe))
+           .map(X => ({ x:X.x*kp + dx, y:X.y*kp + dy })) });
   ctx.drawImage(b2, 0, 0);
 }
 
